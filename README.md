@@ -23,6 +23,8 @@ Environment: Best run on Windows/Linux (Recommended: NVIDIA GPU for vision proce
 
 Hardware: Dobot E6, 2x USB Webcams, Ethernet connection
 
+
+
 ### Workflow & Safety Rules (Mandatory)
 As we are working with a physical 6-axis robot, safety and code integrity are non-negotiable.
 
