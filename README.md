@@ -23,17 +23,7 @@ Environment: Best run on Windows/Linux (Recommended: NVIDIA GPU for vision proce
 
 Hardware: Dobot E6, 2x USB Webcams, Ethernet connection
 
-📁 Repository Structure
-Plaintext
-├── .github/             # PR Templates & CODEOWNERS
-├── docs/                # Technical manuals & wiring diagrams
-├── src/
-│   ├── vision/          # Camera calibration & stereo mapping
-│   ├── control/         # Dobot SDK movement logic
-│   └── perception/      # AI models for object detection
-├── tests/               # Simulation & unit tests
-├── requirements.txt     # List of dependencies
-└── main.py              # Central execution script
+
 
 ### Workflow & Safety Rules (Mandatory)
 As we are working with a physical 6-axis robot, safety and code integrity are non-negotiable.
