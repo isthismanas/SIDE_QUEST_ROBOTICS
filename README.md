@@ -1,6 +1,6 @@
 # SIDE_QUEST_ROBOTICS
-Robotics Team for the SIDE QUEST experience at the Australian Rover Challenge
-## Project: Spatially Aware Robot
+Robotics Team for the SIDE QUEST experience, a project by Albert Rajkumar,  at the Australian Rover Challenge
+## Project: Spatially Aware Robot 
 Autonomous 6-Axis Spatial Awareness using Stereo Vision
 
 This repository contains the software stack for the Dobot Magician E6 to achieve autonomous spatial awareness. Using two synchronized camera feeds (Binocular Vision), the system identifies objects in 3D space, calculates their coordinates, and executes precision manipulation.
