@@ -55,7 +55,9 @@ Install Dependencies:
 
 
 
-📅 Milestones
+Milestones
+
+
 [ ] Week 1: Stereo Camera Calibration & Depth Map generation.
 
 [ ] Week 2: Hand-Eye Calibration (Mapping pixels to robot mm).
