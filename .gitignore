@@ -1,0 +1,43 @@
+# =====================
+# Python
+# =====================
+__pycache__/
+*.py[cod]
+*.log
+*.env
+venv/
+.env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# =====================
+# ROS build artifacts
+# =====================
+build/
+install/
+log/
+
+# =====================
+# ML / Large Model Files
+# =====================
+*.pth
+*.pt
+*.onnx
+*.h5
+
+# =====================
+# Unity (XR side)
+# =====================
+[Ll]ibrary/
+[Tt]emp/
+[Bb]uild/
+[Bb]uilds/
+UserSettings/
+*.unitypackage
+
+# =====================
+# OS junk
+# =====================
+.DS_Store
+Thumbs.db
