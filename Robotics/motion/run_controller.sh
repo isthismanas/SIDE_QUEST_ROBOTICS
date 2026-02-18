@@ -1,11 +1,11 @@
 #!/bin/bash
+set -e
 
-# Always run from project root
-cd ~/sidequest || exit
+# Always run from repo root (two levels up from motion/)
+cd "$(dirname "$0")/../.." || exit
 
-# Activate virtual environment
+# Activate known-good environment
 source ~/regolith-robotics-env/bin/activate
 
-# Run the task controller
-python3 task_controller.py
-
+# Run controller
+python3 Robotics/motion/task_controller.py
