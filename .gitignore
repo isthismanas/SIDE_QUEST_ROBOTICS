@@ -3,10 +3,13 @@
 # =====================
 __pycache__/
 *.py[cod]
+*.pyc
 *.log
 *.env
 venv/
 .env/
+.venv/
+env/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -41,3 +44,6 @@ UserSettings/
 # =====================
 .DS_Store
 Thumbs.db
+.venv/
+__pycache__/
+*.pyc
