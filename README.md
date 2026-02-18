@@ -31,14 +31,12 @@ As we are working with a physical 6-axis robot, safety and code integrity are no
 1. The Branching Strategy
 Never push directly to main.
 
-Create a feature branch for every task: git checkout -b feature/your-task-name.
-
 2. Pull Request (PR) Policy
 All PRs require at least 1 approval before merging.
 
 No Self-Approvals: You cannot approve your own PR.
 
-Code Review: The Lead Developer (@YourGitHubUsername) must be tagged for final review to ensure motor safety and coordinate limits.
+Code Review: The Lead Developer (@isthismanas) must be tagged for final review to ensure motor safety and coordinate limits.
 
 3. Physical Safety
 Speed Factor: Initial tests must always run at SpeedFactor(10) (10% speed).
