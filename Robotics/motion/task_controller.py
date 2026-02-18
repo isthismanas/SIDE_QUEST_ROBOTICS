@@ -1,8 +1,8 @@
 import time, socket, struct, os, threading
 import depthai as dai
 from datetime import timedelta
+import hashlib
 
-# NEW: use your clean driver + config
 from dobot_driver import DobotDriver
 import robot_config as cfg
 
@@ -21,6 +21,26 @@ robot = DobotDriver()
 
 # --- Simple control mode/state (Week 2 skeleton) ---
 MODE = "IDLE"   # IDLE | HOVER_WAIT | NUDGE
+
+# --- NEW: Arm state tied to VR connection lifecycle ---
+robot_armed = False
+
+
+# --- SIGNIFIER: prove which file is running ---
+def _startup_banner():
+    try:
+        path = os.path.abspath(__file__)
+        with open(path, "rb") as f:
+            h = hashlib.sha1(f.read()).hexdigest()[:10]
+        print("\n" + "=" * 72)
+        print("SIDE QUEST TASK CONTROLLER — ARM-ON-CONNECT BUILD (NO PER-COMMAND ARM)")
+        print(f"RUNNING FILE: {path}")
+        print(f"FILE SHA1 (first10): {h}")
+        print("=" * 72 + "\n")
+    except Exception as e:
+        print(f"[WARN] Could not print startup banner: {e}")
+
+_startup_banner()
 
 
 # --- 2. CAMERA PIPELINE ---
@@ -95,37 +115,61 @@ def camera_server(mxid, port, label):
         print(f"[{label}] Error: {e}")
 
 
-# --- Robot action helpers ---
-def ensure_ready(precision: bool = True):
-    """Clear+enable and set speed profile."""
-    spd = cfg.SPEED_PRECISION if precision else cfg.SPEED_TRAVEL
-    robot.clear_and_enable(speed_percent=spd)
+# --- Robot lifecycle helpers ---
+def arm_robot_once():
+    """Arm the robot ONCE per VR connection (latency fix)."""
+    global robot_armed
+    try:
+        robot.clear_and_enable(speed_percent=cfg.SPEED_PRECISION)
+        robot_armed = True
+        print("[ARM] Robot armed on VR connect.")
+    except Exception as e:
+        robot_armed = False
+        print(f"[ARM] FAILED to arm robot on VR connect: {e}")
 
+
+def ensure_ready(precision: bool = True):
+    """
+    IMPORTANT:
+    - We DO NOT ClearError/EnableRobot/SpeedFactor per command anymore.
+    - Arming happens ONCE on VR connect in command_server().
+    """
+    global robot_armed
+    if not robot_armed:
+        print("[SAFETY] Motion ignored: robot DISARMED (no active VR connection).")
+        return False
+    return True
+
+
+# --- Robot actions ---
 def do_home():
     global MODE
     MODE = "IDLE"
-    ensure_ready(precision=True)
+    if not ensure_ready(precision=True):
+        return
     resp = robot.go_home(speed_percent=cfg.SPEED_PRECISION)
     print(f"[HOME] {resp}")
 
+
 def do_drop():
     global MODE
-    # For now: a simple 20mm descent. Later: open gripper + retract + loop.
     MODE = "IDLE"
-    ensure_ready(precision=True)
+    if not ensure_ready(precision=True):
+        return
     resp = robot.relmovl_user(0, 0, -20, 0, 0, 0)
     print(f"[DROP] {resp}")
 
+
 def do_nudge(dx: float, dy: float):
-    # Z locked by design; rotations locked by design (Week 2)
-    ensure_ready(precision=True)
+    if not ensure_ready(precision=True):
+        return
     resp = robot.relmovl_user(dx, dy, 0, 0, 0, 0)
     print(f"[NUDGE] dx={dx} dy={dy} -> {resp}")
 
 
 # --- 4. HIGHWAY 2: COMMAND HUB (Logic Bridge) ---
 def command_server():
-    global MODE
+    global MODE, robot_armed
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -134,12 +178,15 @@ def command_server():
 
     print(f"[CONTROL] Hub ready on {UNITY_PORT_COMMANDS}")
     print("[CONTROL] Commands: HOME | FIX | NUDGE dx dy | DROP | CANCEL | (COMMIT->DROP)")
+    print("[CONTROL] NOTE: Robot arms once per VR connection (no per-command arming).")
 
     while True:
         conn, addr = server.accept()
         print(f"[CONTROL] VR Connected: {addr}")
 
-        # Don't auto-timeout; Unity can sit idle.
+        # Arm once for this VR session
+        arm_robot_once()
+
         conn.settimeout(None)
 
         buf = ""
@@ -151,33 +198,26 @@ def command_server():
 
                 buf += data.decode('utf-8', errors='ignore')
 
-                # Parse newline-delimited commands (recommended)
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
                     msg = line.strip()
                     if not msg:
                         continue
 
-                    # Backward compatibility
                     if msg == "COMMIT":
                         msg = "DROP"
 
-                    print(f"\n[CONTROL] Received: {msg}   (MODE={MODE})")
+                    print(f"\n[CONTROL] Received: {msg}   (MODE={MODE})  (ARMED={robot_armed})")
 
-                    # --- HOME works anytime ---
                     if msg == "HOME":
                         do_home()
                         continue
 
-                    # --- FIX enters NUDGE mode (for now allow anytime; later gate to HOVER_WAIT) ---
                     if msg == "FIX":
-                        # If you want strict gating later:
-                        # if MODE != "HOVER_WAIT": ignore
                         MODE = "NUDGE"
                         print("[MODE] Entered NUDGE mode (Z locked).")
                         continue
 
-                    # --- CANCEL exits NUDGE back to hover wait (or idle for now) ---
                     if msg == "CANCEL":
                         if MODE != "NUDGE":
                             print("[SAFETY] CANCEL ignored (not in NUDGE).")
@@ -186,7 +226,6 @@ def command_server():
                         print("[MODE] Exited NUDGE -> HOVER_WAIT.")
                         continue
 
-                    # --- NUDGE dx dy (base XY) ---
                     if msg.startswith("NUDGE"):
                         if MODE != "NUDGE":
                             print("[SAFETY] NUDGE ignored (not in NUDGE mode).")
@@ -207,7 +246,6 @@ def command_server():
                         do_nudge(dx, dy)
                         continue
 
-                    # --- DROP allowed from hover or nudge (for now allow anytime) ---
                     if msg == "DROP":
                         do_drop()
                         continue
@@ -217,9 +255,13 @@ def command_server():
         except Exception as e:
             print(f"[CONTROL] Connection error: {e}")
         finally:
-            try: conn.close()
-            except: pass
-            print("[CONTROL] VR disconnected.")
+            try:
+                conn.close()
+            except:
+                pass
+
+            robot_armed = False
+            print("[CONTROL] VR disconnected. Robot disarmed.")
 
 
 # --- 5. START SYSTEM ---
@@ -231,4 +273,4 @@ threading.Thread(target=camera_server, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "
 print("TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
 while True:
     time.sleep(1)
-
+EOF
