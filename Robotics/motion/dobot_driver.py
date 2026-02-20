@@ -85,29 +85,69 @@ class DobotDriver:
         # If your installation expects inverse edges, set to False in robot_config.py
         self.GRIP_PULSE_HIGH = getattr(_cfg, "GRIP_PULSE_HIGH", True)
 
+        # Persistent dashboard socket (prevents connect/disconnect spam)
+        self._sock: Optional[socket.socket] = None
+
     # ----------------------------
-    # Core TCP/IP send
+    # Connection management (persistent socket)
+    # ----------------------------
+    def connect(self) -> None:
+        """
+        Open a persistent connection to the dashboard server.
+        This avoids rapid connect/disconnect causing 'port occupied' errors.
+        """
+        if self._sock is not None:
+            return
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(self.timeout_s)
+        s.connect((self.robot_ip, self.port))
+        self._sock = s
+
+    def close(self) -> None:
+        """
+        Close the persistent dashboard connection.
+        """
+        if self._sock is None:
+            return
+        try:
+            self._sock.close()
+        finally:
+            self._sock = None
+
+    def __del__(self):
+        # Best-effort cleanup if user forgets to close()
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    # ----------------------------
+    # Core TCP/IP send (persistent)
     # ----------------------------
     def send(self, cmd: str) -> str:
         """
         Send a single dashboard command and return the raw response.
-        Commands should be newline-terminated for safety.
+        Reuses a persistent socket connection.
         """
         cmd = cmd.strip()
         payload = (cmd + "\n").encode("utf-8")
 
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(self.timeout_s)
+        if self._sock is None:
+            self.connect()
+
         try:
-            s.connect((self.robot_ip, self.port))
-            s.sendall(payload)
-            resp = s.recv(4096).decode("utf-8", errors="ignore").strip()
+            assert self._sock is not None
+            self._sock.sendall(payload)
+            resp = self._sock.recv(4096).decode("utf-8", errors="ignore").strip()
             return resp
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
+        except (socket.timeout, ConnectionError, OSError):
+            # If the connection died or got weird, reset once and retry.
+            self.close()
+            self.connect()
+            assert self._sock is not None
+            self._sock.sendall(payload)
+            resp = self._sock.recv(4096).decode("utf-8", errors="ignore").strip()
+            return resp
 
     # ----------------------------
     # Dashboard response checks
