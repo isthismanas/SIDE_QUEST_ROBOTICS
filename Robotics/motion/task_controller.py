@@ -16,6 +16,10 @@ UNITY_PORT_COMMANDS  = 8088
 MXID_INSPECTOR = "19443010B14C872F00"
 MXID_MANAGER   = "194430108183F12E00"
 
+# --- Gripper ---
+LAST_GRIP_TS = 0.0
+GRIP_DEBOUNCE_S = 0.40
+
 # --- Robot driver instance ---
 robot = DobotDriver()
 
@@ -167,6 +171,53 @@ def do_nudge(dx: float, dy: float):
     print(f"[NUDGE] dx={dx} dy={dy} -> {resp}")
 
 
+def do_grip_toggle():
+    global LAST_GRIP_TS
+    if not ensure_ready(precision=True):
+        return
+
+    now = time.time()
+    if (now - LAST_GRIP_TS) < GRIP_DEBOUNCE_S:
+        print(f"[GRIP] Ignored (debounce {now - LAST_GRIP_TS:.3f}s)")
+        return
+
+    LAST_GRIP_TS = now
+
+    try:
+        robot.grip_toggle()
+        print("[GRIP] TOGGLE")
+    except Exception as e:
+        print(f"[GRIP] FAILED: {e}")
+
+
+def do_grip_open():
+    """
+    Temporary: your DobotDriver implements grip_open() as a toggle pulse (no DI feedback).
+    This exists so Unity can have separate buttons if you want, but behaviour = toggle.
+    """
+    if not ensure_ready(precision=True):
+        return
+    try:
+        robot.grip_open()
+        print("[GRIP] OPEN (currently toggle-backed)")
+    except Exception as e:
+        print(f"[GRIP] OPEN FAILED: {e}")
+
+
+def do_grip_close():
+    """
+    Temporary: your DobotDriver implements grip_close() as a toggle pulse (no DI feedback).
+    Behaviour = toggle until we wire DI feedback.
+    """
+    if not ensure_ready(precision=True):
+        return
+    try:
+        robot.grip_close()
+        print("[GRIP] CLOSE (currently toggle-backed)")
+    except Exception as e:
+        print(f"[GRIP] CLOSE FAILED: {e}")
+
+
 # --- 4. HIGHWAY 2: COMMAND HUB (Logic Bridge) ---
 def command_server():
     global MODE, robot_armed
@@ -177,8 +228,9 @@ def command_server():
     server.listen(1)
 
     print(f"[CONTROL] Hub ready on {UNITY_PORT_COMMANDS}")
-    print("[CONTROL] Commands: HOME | FIX | NUDGE dx dy | DROP | CANCEL | (COMMIT->DROP)")
+    print("[CONTROL] Commands: HOME | FIX | NUDGE dx dy | DROP | CANCEL | GRIP_TOGGLE | GRIP_OPEN | GRIP_CLOSE | (COMMIT->DROP)")
     print("[CONTROL] NOTE: Robot arms once per VR connection (no per-command arming).")
+    print("[CONTROL] NOTE: Gripper requires DH UI Init + IO Mode ON before it will respond.")
 
     while True:
         conn, addr = server.accept()
@@ -188,8 +240,8 @@ def command_server():
         arm_robot_once()
 
         conn.settimeout(None)
-
         buf = ""
+
         try:
             while True:
                 data = conn.recv(1024)
@@ -250,6 +302,19 @@ def command_server():
                         do_drop()
                         continue
 
+                    # --- Gripper commands ---
+                    if msg == "GRIP_TOGGLE":
+                        do_grip_toggle()
+                        continue
+
+                    if msg == "GRIP_OPEN":
+                        do_grip_open()
+                        continue
+
+                    if msg == "GRIP_CLOSE":
+                        do_grip_close()
+                        continue
+
                     print(f"[CONTROL] Unknown command: {msg}")
 
         except Exception as e:
@@ -273,4 +338,3 @@ threading.Thread(target=camera_server, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "
 print("TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
 while True:
     time.sleep(1)
-EOF
