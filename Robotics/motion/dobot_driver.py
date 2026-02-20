@@ -310,6 +310,16 @@ class DobotDriver:
         self.continue_queue()
         return resp
 
+    def movl_pose(self, pose: Pose) -> str:
+        """
+        Linear move in Cartesian space (straight-line path), like DobotStudio 'Linear' mode.
+        """
+        cmd = f"MovL({self._pose_to_cmd(pose)})"
+        resp = self.send(cmd)
+        self._assert_ok(resp, cmd)
+        self.continue_queue()
+        return resp
+
     def relmovl_user(self, dx: float, dy: float, dz: float, drx: float, dry: float, drz: float) -> str:
         cmd = f"RelMovLUser({dx},{dy},{dz},{drx},{dry},{drz})"
         resp = self.send(cmd)
