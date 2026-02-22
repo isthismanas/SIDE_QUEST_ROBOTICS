@@ -4,6 +4,7 @@ from datetime import timedelta
 import hashlib
 
 from dobot_driver import DobotDriver
+from dh_gripper import DHGripperPGE  # NEW: RS485 Modbus gripper driver
 import robot_config as cfg
 
 # --- 0. STABILITY & PORT CONFIG ---
@@ -20,8 +21,22 @@ MXID_MANAGER   = "194430108183F12E00"
 LAST_GRIP_TS = 0.0
 GRIP_DEBOUNCE_S = 0.40
 
+# Deterministic gripper positions (calibrated by you)
+GRIP_OPEN_POS  = 900
+GRIP_CLOSE_POS = 50
+
 # --- Robot driver instance ---
 robot = DobotDriver()
+
+# --- Gripper driver instance (RS485 Modbus) ---
+gripper = DHGripperPGE(
+    port="/dev/ttyUSB0",
+    baudrate=115200,
+    device_id=1,
+    open_pos=GRIP_OPEN_POS,
+    close_pos=GRIP_CLOSE_POS,
+)
+gripper_connected = False
 
 # --- Simple control mode/state (Week 2 skeleton) ---
 MODE = "IDLE"   # IDLE | HOVER_WAIT | NUDGE
@@ -132,6 +147,28 @@ def arm_robot_once():
         print(f"[ARM] FAILED to arm robot on VR connect: {e}")
 
 
+def connect_gripper_once():
+    """Connect gripper ONCE per VR connection."""
+    global gripper_connected
+    if gripper_connected:
+        return
+    print("[GRIPPER] Connecting via RS485 Modbus (/dev/ttyUSB0, 115200, id=1)...")
+    try:
+        ok = gripper.connect()
+        if not ok:
+            gripper_connected = False
+            print("[GRIPPER] FAILED to connect (connect() returned False).")
+            return
+        gripper_connected = True
+        try:
+            print("[GRIPPER] Connected. Status:", gripper.status())
+        except Exception as e:
+            print(f"[GRIPPER] Connected but status read failed: {e}")
+    except Exception as e:
+        gripper_connected = False
+        print(f"[GRIPPER] FAILED to connect: {e}")
+
+
 def ensure_ready(precision: bool = True):
     """
     IMPORTANT:
@@ -141,6 +178,13 @@ def ensure_ready(precision: bool = True):
     global robot_armed
     if not robot_armed:
         print("[SAFETY] Motion ignored: robot DISARMED (no active VR connection).")
+        return False
+    return True
+
+
+def ensure_gripper_ready():
+    if not gripper_connected:
+        print("[SAFETY] Gripper ignored: gripper NOT connected (RS485).")
         return False
     return True
 
@@ -171,56 +215,69 @@ def do_nudge(dx: float, dy: float):
     print(f"[NUDGE] dx={dx} dy={dy} -> {resp}")
 
 
+# --- Gripper actions (NOW deterministic via Modbus) ---
 def do_grip_toggle():
     global LAST_GRIP_TS
     if not ensure_ready(precision=True):
+        return
+    if not ensure_gripper_ready():
         return
 
     now = time.time()
     if (now - LAST_GRIP_TS) < GRIP_DEBOUNCE_S:
         print(f"[GRIP] Ignored (debounce {now - LAST_GRIP_TS:.3f}s)")
         return
-
     LAST_GRIP_TS = now
 
     try:
-        robot.grip_toggle()
-        print("[GRIP] TOGGLE")
+        st = gripper.status()
+        pos = st.get("pos", None)
+        if pos is None:
+            print("[GRIP] Cannot toggle: no pos in status:", st)
+            return
+
+        mid = (GRIP_OPEN_POS + GRIP_CLOSE_POS) / 2.0
+        if pos >= mid:
+            print(f"[GRIP] TOGGLE -> CLOSE (pos={pos})")
+            st2 = gripper.goto(GRIP_CLOSE_POS, timeout_s=5.0)
+        else:
+            print(f"[GRIP] TOGGLE -> OPEN (pos={pos})")
+            st2 = gripper.goto(GRIP_OPEN_POS, timeout_s=5.0)
+
+        print("[GRIP] DONE:", st2)
     except Exception as e:
         print(f"[GRIP] FAILED: {e}")
 
 
 def do_grip_open():
-    """
-    Temporary: your DobotDriver implements grip_open() as a toggle pulse (no DI feedback).
-    This exists so Unity can have separate buttons if you want, but behaviour = toggle.
-    """
     if not ensure_ready(precision=True):
         return
+    if not ensure_gripper_ready():
+        return
     try:
-        robot.grip_open()
-        print("[GRIP] OPEN (currently toggle-backed)")
+        print("[GRIP] OPEN (Modbus)")
+        st = gripper.goto(GRIP_OPEN_POS, timeout_s=5.0)
+        print("[GRIP] OPEN DONE:", st)
     except Exception as e:
         print(f"[GRIP] OPEN FAILED: {e}")
 
 
 def do_grip_close():
-    """
-    Temporary: your DobotDriver implements grip_close() as a toggle pulse (no DI feedback).
-    Behaviour = toggle until we wire DI feedback.
-    """
     if not ensure_ready(precision=True):
         return
+    if not ensure_gripper_ready():
+        return
     try:
-        robot.grip_close()
-        print("[GRIP] CLOSE (currently toggle-backed)")
+        print("[GRIP] CLOSE (Modbus)")
+        st = gripper.goto(GRIP_CLOSE_POS, timeout_s=5.0)
+        print("[GRIP] CLOSE DONE:", st)
     except Exception as e:
         print(f"[GRIP] CLOSE FAILED: {e}")
 
 
 # --- 4. HIGHWAY 2: COMMAND HUB (Logic Bridge) ---
 def command_server():
-    global MODE, robot_armed
+    global MODE, robot_armed, gripper_connected
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -230,7 +287,7 @@ def command_server():
     print(f"[CONTROL] Hub ready on {UNITY_PORT_COMMANDS}")
     print("[CONTROL] Commands: HOME | FIX | NUDGE dx dy | DROP | CANCEL | GRIP_TOGGLE | GRIP_OPEN | GRIP_CLOSE | (COMMIT->DROP)")
     print("[CONTROL] NOTE: Robot arms once per VR connection (no per-command arming).")
-    print("[CONTROL] NOTE: Gripper requires DH UI Init + IO Mode ON before it will respond.")
+    print("[CONTROL] NOTE: Gripper is RS485 Modbus (no DH UI Init toggle required).")
 
     while True:
         conn, addr = server.accept()
@@ -238,6 +295,9 @@ def command_server():
 
         # Arm once for this VR session
         arm_robot_once()
+
+        # Connect gripper once for this VR session
+        connect_gripper_once()
 
         conn.settimeout(None)
         buf = ""
@@ -259,7 +319,7 @@ def command_server():
                     if msg == "COMMIT":
                         msg = "DROP"
 
-                    print(f"\n[CONTROL] Received: {msg}   (MODE={MODE})  (ARMED={robot_armed})")
+                    print(f"\n[CONTROL] Received: {msg}   (MODE={MODE})  (ARMED={robot_armed})  (GRIPPER={gripper_connected})")
 
                     if msg == "HOME":
                         do_home()
@@ -327,6 +387,10 @@ def command_server():
 
             robot_armed = False
             print("[CONTROL] VR disconnected. Robot disarmed.")
+
+            # Keep the gripper connection status conservative:
+            # If Unity reconnects, we'll re-attempt connect.
+            gripper_connected = False
 
 
 # --- 5. START SYSTEM ---
