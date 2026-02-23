@@ -1,8 +1,7 @@
 Robotics Technical Brief (v6)
 
 Project: Side Quest: The Leaning Tower of Regolith (ARC 2026) Target
-Sub-Team: Robotics Last Updated: 20 Feb 2026 (Dev 7 – RS485 Integration
-Complete)
+Sub-Team: Robotics Last Updated: 23 Feb 2026 (Dev 8 – Autonomous 7-Block Loop Stabilized)
 
 ================================================================
 
@@ -47,29 +46,32 @@ Ports 8085 / 8086. Pi executes all motion primitives.
 
 3.  Control Architecture (Task Controller)
 
-Current Implemented States (Dev 7):
+Current Implemented States (Dev 8):
 
 IDLE
-HOVER_WAIT
-NUDGE
+MOVING_TO_PICK
+MOVING_TO_TOWER_HOVER
+WAITING_FOR_DECISION
+PLACING
 FAULT
 
-The full stacking state machine (MOVING_TO_PICK → GRIPPING → MOVING_TO_HOVER → PLACING → RETRACTING) is architected but not yet fully implemented.
+The stacking state machine is now fully implemented for deterministic 7-block execution.
 
-State Machine Extraction (Dev 7 Refactor)
+Core Loop (Dev 8 Stable):
 
-The state machine logic has been separated into a dedicated module (state_machine.py).
+START → Pick sequence (MovJ hover → MovL descend → grip → MovL retract → MovJ exit)
 
-task_controller.py is now orchestration-only.
-All motion side-effects are handled in actions.py.
+Move to tower hover (MovJ)
 
-Core Loop: 1. Move to Pick pose 2. Close gripper (RS485 deterministic
-command) 3. Move to Hover pose 4. WAITING_FOR_DECISION
+WAITING_FOR_DECISION
 
-At decision state: - DROP → PLACING - FIX → NUDGE_MODE
+DROP → complete_place_sequence()
 
-NUDGE_MODE: - Discrete button-based - XY translation only - Optional
-yaw - Z locked - Small increments (3 mm XY, 2° yaw) - Reduced speed
+Auto-continue to next block
+
+Repeat until tower complete (7 blocks)
+
+Auto-continue logic is internal to task_controller and does not require Unity re-triggering START.
 
 ================================================================
 
@@ -108,6 +110,37 @@ behavior. No Continue() dependency.
 Planned: Auto-initialization routine at Task Controller startup.
 
 ================================================================
+
+4.2 Retreat Geometry & IK Constraints (Dev 8)
+
+During high-level stacking (levels 5–7), direct MovJ transitions from tower hover to neutral produced collisions and IK failures.
+
+Observed constraint:
+
+IK infeasible above ≈430 mm on tower vertical axis
+
+Tower hover at level 6 ≈420 mm
+
+Additional vertical clearance caused IK faults (RobotMode 9)
+
+Final stabilized retreat strategy:
+
+MovL to tower hover (linear vertical retract)
+
+For high stack levels (≥5), perform linear +Y sidestep to Y ≈ -10 mm
+
+MovJ to NEUTRAL_3 (validated safe pose)
+
+This ensures:
+
+No diagonal joint sweep through tower envelope
+
+No IK overshoot above 430 mm limit
+
+Deterministic escape geometry at full height
+
+This geometry is now validated for 7-block autonomous stacking.
+
 
 5.  Placement Evaluation (Planned – Not Yet Active)
 
@@ -157,18 +190,18 @@ Partially Implemented:
 - Minimal pick and drop primitives
 - NUDGE mode (XY only)
 
-Not Yet Implemented:
-- Full autonomous stacking loop
-- Vision-derived pose integration
-- Placement verdict computation (G/Y/R)
-- Combo mode
-- Fault escalation logic
+Implemented (Dev 8):
+- Full autonomous 7-block stacking loop
+- Deterministic retreat logic with IK ceiling compliance
+- High-level sidestep escape maneuver
+- Fault detection via RobotMode (9 / 11)
+- Autonomous continuation without Unity re-trigger
 
 ================================================================
 
 9.  Roadmap
 
-Phase 1 – Deterministic Motion Phase 2 – State Machine Integration Phase
+Phase 1 – Deterministic Motion (Complete – Dev 8) Phase 2 – State Machine Integration Phase
 3 – Vision Pose Integration Phase 4 – Evaluation + Combo Phase 5 –
 Safety Hardening
 
