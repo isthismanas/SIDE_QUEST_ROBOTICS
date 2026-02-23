@@ -201,9 +201,27 @@ def complete_place_sequence(handles: SystemHandles, stack_level: int) -> None:
 
     # Linear vertical retract
     robot.movl_pose(hover_pose)
+    # Ensure retract finished before joint exit
+    robot.wait_until_idle()
 
-    # Joint exit to neutral
-    robot.movj_pose(cfg.NEUTRAL_2)
+    # Optional sidestep for very high stacks to reduce joint travel over tower
+    if stack_level >= 5:
+        sidestep_pose = (
+            hover_pose[0],
+            -10.0,
+            hover_pose[2],
+            hover_pose[3],
+            hover_pose[4],
+            hover_pose[5],
+        )
+        robot.movl_pose(sidestep_pose)
+        robot.wait_until_idle()
+
+    # Select neutral exit based on stack height
+    if stack_level >= 3:
+        robot.movj_pose(cfg.NEUTRAL_3)
+    else:
+        robot.movj_pose(cfg.NEUTRAL_2)
 
 
 # ----------------------------

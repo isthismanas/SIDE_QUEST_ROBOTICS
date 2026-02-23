@@ -190,6 +190,10 @@ def command_server():
         # Initialize fresh stacking session
         current_pick_index = 0
         current_stack_level = 0
+        # Dev 8 autonomous stacking loop controls
+        stacking_enabled = True
+        target_stack_count = min(7, len(cfg.PICK_SEQUENCE))
+        controller_busy = False
 
         # Arm once for this VR session
         try:
@@ -235,6 +239,19 @@ def command_server():
 
                     print(f"\n[CONTROL] Received: {cmd_str}   (STATE={STATE.name})  (ARMED={robot_armed})  (GRIPPER={gripper_connected})")
 
+                    # SAFE_RESET short-circuit (before parsing)
+                    if cmd_str == "SAFE_RESET":
+                        try:
+                            print("[CONTROL] SAFE_RESET requested.")
+                            actions.do_home(handles)
+                            actions.do_grip_open(handles)
+                            STATE = State.IDLE
+                            current_pick_index = 0
+                            current_stack_level = 0
+                        except Exception as e:
+                            print(f"[CONTROL] SAFE_RESET failed: {e}")
+                        continue
+
                     # Parse command into event using state machine
                     try:
                         event, payload = parse_event(cmd_str)
@@ -267,69 +284,123 @@ def command_server():
 
                     # Execute side-effects based on event
                     if event == Event.HOME:
-                        actions.do_home(handles)
+                        if controller_busy:
+                            print("[GATE] Controller busy.")
+                            continue
+                        controller_busy = True
+                        try:
+                            actions.do_home(handles)
+                        finally:
+                            controller_busy = False
 
                     elif event == Event.START_STACK:
-                        # Bounds checking
-                        if current_pick_index >= len(cfg.PICK_SEQUENCE):
-                            print("[STACK] No more blocks in PICK_SEQUENCE. Ignoring START.")
+                        if controller_busy:
+                            print("[GATE] Controller busy.")
                             continue
+                        controller_busy = True
+                        try:
+                            # Bounds checking
+                            if current_pick_index >= len(cfg.PICK_SEQUENCE):
+                                print("[STACK] No more blocks in PICK_SEQUENCE. Ignoring START.")
+                                continue
 
-                        if current_stack_level >= 7:
-                            print("[STACK] Tower full. Ignoring START.")
-                            continue
+                            if current_stack_level >= 7:
+                                print("[STACK] Tower full. Ignoring START.")
+                                continue
 
-                        # Execute pick sequence
-                        side, level = cfg.PICK_SEQUENCE[current_pick_index]
-                        actions.execute_pick_sequence(handles, side, level)
+                            # Execute pick sequence
+                            side, level = cfg.PICK_SEQUENCE[current_pick_index]
+                            actions.execute_pick_sequence(handles, side, level)
 
-                        # Emit internal progression event
-                        result2 = step(STATE, Event.PICK_COMPLETE)
-                        if result2.allowed:
-                            STATE = result2.next_state
-                            print(f"[SM] -> {STATE.name} (PICK_COMPLETE)")
+                            # Emit internal progression event
+                            result2 = step(STATE, Event.PICK_COMPLETE)
+                            if result2.allowed:
+                                STATE = result2.next_state
+                                print(f"[SM] -> {STATE.name} (PICK_COMPLETE)")
 
-                            # Immediately move to tower hover
-                            if STATE == State.MOVING_TO_TOWER_HOVER:
-                                actions.move_to_tower_hover(handles, current_stack_level)
+                                # Immediately move to tower hover
+                                if STATE == State.MOVING_TO_TOWER_HOVER:
+                                    actions.move_to_tower_hover(handles, current_stack_level)
 
-                                result3 = step(STATE, Event.AT_TOWER_HOVER)
-                                if result3.allowed:
-                                    STATE = result3.next_state
-                                    print(f"[SM] -> {STATE.name} (AT_TOWER_HOVER)")
+                                    result3 = step(STATE, Event.AT_TOWER_HOVER)
+                                    if result3.allowed:
+                                        STATE = result3.next_state
+                                        print(f"[SM] -> {STATE.name} (AT_TOWER_HOVER)")
+                        finally:
+                            controller_busy = False
 
                     elif event == Event.FIX:
                         # no motion yet; just entering NUDGE
                         pass
 
                     elif event == Event.NUDGE_XY:
-                        actions.do_nudge_xy(handles, payload["dx"], payload["dy"])
+                        if controller_busy:
+                            print("[GATE] Controller busy.")
+                            continue
+                        controller_busy = True
+                        try:
+                            actions.do_nudge_xy(handles, payload["dx"], payload["dy"])
+                        finally:
+                            controller_busy = False
 
                     elif event == Event.NUDGE_YAW:
-                        actions.do_nudge_yaw(handles, payload["dtheta"])
+                        if controller_busy:
+                            print("[GATE] Controller busy.")
+                            continue
+                        controller_busy = True
+                        try:
+                            actions.do_nudge_yaw(handles, payload["dtheta"])
+                        finally:
+                            controller_busy = False
 
                     elif event == Event.DROP:
-                        # Attempt placement with error handling
-                        try:
-                            actions.complete_place_sequence(handles, current_stack_level)
-                        except Exception as e:
-                            print(f"[STACK] Place failed: {e}")
-                            # Emit fault event
-                            fault_result = step(STATE, Event.FAULT)
-                            if fault_result.allowed:
-                                STATE = fault_result.next_state
-                                print(f"[SM] -> {STATE.name} (FAULT)")
+                        if controller_busy:
+                            print("[GATE] Controller busy.")
                             continue
+                        controller_busy = True
+                        try:
+                            # Attempt placement with error handling
+                            try:
+                                actions.complete_place_sequence(handles, current_stack_level)
+                            except Exception as e:
+                                print(f"[STACK] Place failed: {e}")
+                                # Emit fault event
+                                fault_result = step(STATE, Event.FAULT)
+                                if fault_result.allowed:
+                                    STATE = fault_result.next_state
+                                    print(f"[SM] -> {STATE.name} (FAULT)")
+                                continue
 
-                        # Update stack counters only on success
-                        current_stack_level += 1
-                        current_pick_index += 1
+                            # Update stack counters only on success
+                            current_stack_level += 1
+                            current_pick_index += 1
 
-                        # Emit internal progression event
-                        result4 = step(STATE, Event.PLACE_COMPLETE)
-                        if result4.allowed:
-                            STATE = result4.next_state
-                            print(f"[SM] -> {STATE.name} (PLACE_COMPLETE)")
+                            # Emit internal progression event
+                            result4 = step(STATE, Event.PLACE_COMPLETE)
+                            if result4.allowed:
+                                STATE = result4.next_state
+                                print(f"[SM] -> {STATE.name} (PLACE_COMPLETE)")
+
+                                # Auto-continue stacking if enabled and targets remain
+                                if stacking_enabled and current_stack_level < target_stack_count and current_pick_index < len(cfg.PICK_SEQUENCE):
+                                    print("[STACK] Auto-continue to next block.")
+                                    auto_result = step(STATE, Event.START_STACK)
+                                    if auto_result.allowed:
+                                        STATE = auto_result.next_state
+                                        side, level = cfg.PICK_SEQUENCE[current_pick_index]
+                                        actions.execute_pick_sequence(handles, side, level)
+                                        result2 = step(STATE, Event.PICK_COMPLETE)
+                                        if result2.allowed:
+                                            STATE = result2.next_state
+                                            if STATE == State.MOVING_TO_TOWER_HOVER:
+                                                actions.move_to_tower_hover(handles, current_stack_level)
+                                                result3 = step(STATE, Event.AT_TOWER_HOVER)
+                                                if result3.allowed:
+                                                    STATE = result3.next_state
+                                else:
+                                    print("[STACK] Target reached or no more blocks.")
+                        finally:
+                            controller_busy = False
 
                     elif event == Event.CANCEL:
                         # returns to WAITING_FOR_DECISION by state machine; no motion needed

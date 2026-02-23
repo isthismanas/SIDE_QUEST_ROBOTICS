@@ -35,13 +35,7 @@ COMBO_SPEED_BONUS = 10
 # Safe Home / Idle pose (tested; adjust as needed)
 SAFE_HOME_POSE = (273.2320, -23.7896, 378.5702, -180.0, 0.0, -124.0)
 NEUTRAL_2 = (273.2320, -23.7896, 294.4369, -180.0, 0.0, -124.0)
-
-# Placeholders — replace with measured/validated poses
-PICK_POSE = (0, 0, 0, 0, 0, 0)     # TODO: fill
-HOVER_POSE = (0, 0, 0, 0, 0, 0)    # TODO: fill
-
-# Optional: a safe "above-place" pose if you want one later
-# PLACE_APPROACH_POSE = (...)
+NEUTRAL_3 = (273.2320, -23.7896, 378.5702, -180.0, 0.0, -124.0,)
 
 # ----------------------------
 # Nudge Settings
