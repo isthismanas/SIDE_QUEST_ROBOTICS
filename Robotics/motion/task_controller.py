@@ -2,10 +2,16 @@ import time, socket, struct, os, threading
 import depthai as dai
 from datetime import timedelta
 import hashlib
+from state_machine import State, Event, step, parse_event
 
+import actions
+from actions import SystemHandles
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE  # NEW: RS485 Modbus gripper driver
 import robot_config as cfg
+
+print("USING ACTIONS FROM:", actions.__file__)
+
 
 # --- 0. STABILITY & PORT CONFIG ---
 os.environ["DEPTHAI_WATCHDOG_TIMEOUT"] = "5000"
@@ -30,16 +36,18 @@ robot = DobotDriver()
 
 # --- Gripper driver instance (RS485 Modbus) ---
 gripper = DHGripperPGE(
-    port="/dev/ttyUSB0",
-    baudrate=115200,
-    device_id=1,
-    open_pos=GRIP_OPEN_POS,
-    close_pos=GRIP_CLOSE_POS,
+    port=cfg.GRIPPER_PORT,
+    baudrate=cfg.GRIPPER_BAUDRATE,
+    device_id=cfg.GRIPPER_SLAVE_ID,
 )
+
+# --- System handles (dependency injection) ---
+handles = SystemHandles(robot=robot, gripper=gripper)
+
 gripper_connected = False
 
-# --- Simple control mode/state (Week 2 skeleton) ---
-MODE = "IDLE"   # IDLE | HOVER_WAIT | NUDGE
+# --- Simple control mode/state (via State Machine) ---
+STATE = State.IDLE
 
 # --- NEW: Arm state tied to VR connection lifecycle ---
 robot_armed = False
@@ -133,42 +141,6 @@ def camera_server(mxid, port, label):
     except Exception as e:
         print(f"[{label}] Error: {e}")
 
-
-# --- Robot lifecycle helpers ---
-def arm_robot_once():
-    """Arm the robot ONCE per VR connection (latency fix)."""
-    global robot_armed
-    try:
-        robot.clear_and_enable(speed_percent=cfg.SPEED_PRECISION)
-        robot_armed = True
-        print("[ARM] Robot armed on VR connect.")
-    except Exception as e:
-        robot_armed = False
-        print(f"[ARM] FAILED to arm robot on VR connect: {e}")
-
-
-def connect_gripper_once():
-    """Connect gripper ONCE per VR connection."""
-    global gripper_connected
-    if gripper_connected:
-        return
-    print("[GRIPPER] Connecting via RS485 Modbus (/dev/ttyUSB0, 115200, id=1)...")
-    try:
-        ok = gripper.connect()
-        if not ok:
-            gripper_connected = False
-            print("[GRIPPER] FAILED to connect (connect() returned False).")
-            return
-        gripper_connected = True
-        try:
-            print("[GRIPPER] Connected. Status:", gripper.status())
-        except Exception as e:
-            print(f"[GRIPPER] Connected but status read failed: {e}")
-    except Exception as e:
-        gripper_connected = False
-        print(f"[GRIPPER] FAILED to connect: {e}")
-
-
 def ensure_ready(precision: bool = True):
     """
     IMPORTANT:
@@ -190,94 +162,13 @@ def ensure_gripper_ready():
 
 
 # --- Robot actions ---
-def do_home():
-    global MODE
-    MODE = "IDLE"
-    if not ensure_ready(precision=True):
-        return
-    resp = robot.go_home(speed_percent=cfg.SPEED_PRECISION)
-    print(f"[HOME] {resp}")
-
-
-def do_drop():
-    global MODE
-    MODE = "IDLE"
-    if not ensure_ready(precision=True):
-        return
-    resp = robot.relmovl_user(0, 0, -20, 0, 0, 0)
-    print(f"[DROP] {resp}")
-
-
-def do_nudge(dx: float, dy: float):
-    if not ensure_ready(precision=True):
-        return
-    resp = robot.relmovl_user(dx, dy, 0, 0, 0, 0)
-    print(f"[NUDGE] dx={dx} dy={dy} -> {resp}")
-
-
-# --- Gripper actions (NOW deterministic via Modbus) ---
-def do_grip_toggle():
-    global LAST_GRIP_TS
-    if not ensure_ready(precision=True):
-        return
-    if not ensure_gripper_ready():
-        return
-
-    now = time.time()
-    if (now - LAST_GRIP_TS) < GRIP_DEBOUNCE_S:
-        print(f"[GRIP] Ignored (debounce {now - LAST_GRIP_TS:.3f}s)")
-        return
-    LAST_GRIP_TS = now
-
-    try:
-        st = gripper.status()
-        pos = st.get("pos", None)
-        if pos is None:
-            print("[GRIP] Cannot toggle: no pos in status:", st)
-            return
-
-        mid = (GRIP_OPEN_POS + GRIP_CLOSE_POS) / 2.0
-        if pos >= mid:
-            print(f"[GRIP] TOGGLE -> CLOSE (pos={pos})")
-            st2 = gripper.goto(GRIP_CLOSE_POS, timeout_s=5.0)
-        else:
-            print(f"[GRIP] TOGGLE -> OPEN (pos={pos})")
-            st2 = gripper.goto(GRIP_OPEN_POS, timeout_s=5.0)
-
-        print("[GRIP] DONE:", st2)
-    except Exception as e:
-        print(f"[GRIP] FAILED: {e}")
-
-
-def do_grip_open():
-    if not ensure_ready(precision=True):
-        return
-    if not ensure_gripper_ready():
-        return
-    try:
-        print("[GRIP] OPEN (Modbus)")
-        st = gripper.goto(GRIP_OPEN_POS, timeout_s=5.0)
-        print("[GRIP] OPEN DONE:", st)
-    except Exception as e:
-        print(f"[GRIP] OPEN FAILED: {e}")
-
-
-def do_grip_close():
-    if not ensure_ready(precision=True):
-        return
-    if not ensure_gripper_ready():
-        return
-    try:
-        print("[GRIP] CLOSE (Modbus)")
-        st = gripper.goto(GRIP_CLOSE_POS, timeout_s=5.0)
-        print("[GRIP] CLOSE DONE:", st)
-    except Exception as e:
-        print(f"[GRIP] CLOSE FAILED: {e}")
+# NOTE: Robot action functions (do_home, do_drop, do_nudge_xy, etc.) are now
+# imported from actions.py module along with their SystemHandles dependency.
 
 
 # --- 4. HIGHWAY 2: COMMAND HUB (Logic Bridge) ---
 def command_server():
-    global MODE, robot_armed, gripper_connected
+    global STATE, robot_armed, gripper_connected
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -293,11 +184,34 @@ def command_server():
         conn, addr = server.accept()
         print(f"[CONTROL] VR Connected: {addr}")
 
+        # Reset state machine for new session
+        STATE = State.IDLE
+
+        # Initialize fresh stacking session
+        current_pick_index = 0
+        current_stack_level = 0
+
         # Arm once for this VR session
-        arm_robot_once()
+        try:
+            actions.arm_robot_once(handles)
+            robot_armed = True
+        except Exception as e:
+            robot_armed = False
+            print(f"[CONTROL] Robot arm FAILED: {e}")
 
         # Connect gripper once for this VR session
-        connect_gripper_once()
+        try:
+            actions.connect_gripper_once(handles)
+            gripper_connected = True
+        except Exception as e:
+            gripper_connected = False
+            print(f"[CONTROL] Gripper connect FAILED: {e}")
+
+        # Initialize stack session (home + open gripper)
+        try:
+            actions.initialize_stack_session(handles)
+        except Exception as e:
+            print(f"[CONTROL] Session init FAILED: {e}")
 
         conn.settimeout(None)
         buf = ""
@@ -312,70 +226,123 @@ def command_server():
 
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
-                    msg = line.strip()
-                    if not msg:
+                    cmd_str = line.strip()
+                    if not cmd_str:
                         continue
 
-                    if msg == "COMMIT":
-                        msg = "DROP"
+                    if cmd_str == "COMMIT":
+                        cmd_str = "DROP"
 
-                    print(f"\n[CONTROL] Received: {msg}   (MODE={MODE})  (ARMED={robot_armed})  (GRIPPER={gripper_connected})")
+                    print(f"\n[CONTROL] Received: {cmd_str}   (STATE={STATE.name})  (ARMED={robot_armed})  (GRIPPER={gripper_connected})")
 
-                    if msg == "HOME":
-                        do_home()
+                    # Parse command into event using state machine
+                    try:
+                        event, payload = parse_event(cmd_str)
+                    except ValueError as e:
+                        print(f"[CMD] Reject: {e}")
                         continue
 
-                    if msg == "FIX":
-                        MODE = "NUDGE"
-                        print("[MODE] Entered NUDGE mode (Z locked).")
+                    # Gate transition using state machine
+                    result = step(STATE, event)
+                    if not result.allowed:
+                        print(f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason={result.reason}")
                         continue
 
-                    if msg == "CANCEL":
-                        if MODE != "NUDGE":
-                            print("[SAFETY] CANCEL ignored (not in NUDGE).")
-                            continue
-                        MODE = "HOVER_WAIT"
-                        print("[MODE] Exited NUDGE -> HOVER_WAIT.")
-                        continue
+                    # Apply state transition
+                    prev = STATE
+                    STATE = result.next_state
+                    if STATE != prev:
+                        print(f"[SM] {prev.name} -> {STATE.name} on {event.name}")
 
-                    if msg.startswith("NUDGE"):
-                        if MODE != "NUDGE":
-                            print("[SAFETY] NUDGE ignored (not in NUDGE mode).")
-                            continue
-
-                        parts = msg.split()
-                        if len(parts) != 3:
-                            print("[SAFETY] NUDGE format must be: NUDGE dx dy (e.g., 'NUDGE 3 0')")
+                    # Safety gates (keep command thread alive; just refuse execution)
+                    if event in {Event.HOME, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW, Event.DROP, Event.START_STACK}:
+                        if not robot_armed:
+                            print("[GATE] Robot not armed. Ignoring motion command.")
                             continue
 
+                    if event in {Event.GRIP_OPEN, Event.GRIP_CLOSE, Event.GRIP_TOGGLE}:
+                        if not gripper_connected:
+                            print("[GATE] Gripper not connected. Ignoring gripper command.")
+                            continue
+
+                    # Execute side-effects based on event
+                    if event == Event.HOME:
+                        actions.do_home(handles)
+
+                    elif event == Event.START_STACK:
+                        # Bounds checking
+                        if current_pick_index >= len(cfg.PICK_SEQUENCE):
+                            print("[STACK] No more blocks in PICK_SEQUENCE. Ignoring START.")
+                            continue
+
+                        if current_stack_level >= 7:
+                            print("[STACK] Tower full. Ignoring START.")
+                            continue
+
+                        # Execute pick sequence
+                        side, level = cfg.PICK_SEQUENCE[current_pick_index]
+                        actions.execute_pick_sequence(handles, side, level)
+
+                        # Emit internal progression event
+                        result2 = step(STATE, Event.PICK_COMPLETE)
+                        if result2.allowed:
+                            STATE = result2.next_state
+                            print(f"[SM] -> {STATE.name} (PICK_COMPLETE)")
+
+                            # Immediately move to tower hover
+                            if STATE == State.MOVING_TO_TOWER_HOVER:
+                                actions.move_to_tower_hover(handles, current_stack_level)
+
+                                result3 = step(STATE, Event.AT_TOWER_HOVER)
+                                if result3.allowed:
+                                    STATE = result3.next_state
+                                    print(f"[SM] -> {STATE.name} (AT_TOWER_HOVER)")
+
+                    elif event == Event.FIX:
+                        # no motion yet; just entering NUDGE
+                        pass
+
+                    elif event == Event.NUDGE_XY:
+                        actions.do_nudge_xy(handles, payload["dx"], payload["dy"])
+
+                    elif event == Event.NUDGE_YAW:
+                        actions.do_nudge_yaw(handles, payload["dtheta"])
+
+                    elif event == Event.DROP:
+                        # Attempt placement with error handling
                         try:
-                            dx = float(parts[1])
-                            dy = float(parts[2])
-                        except ValueError:
-                            print("[SAFETY] NUDGE dx/dy must be numbers.")
+                            actions.complete_place_sequence(handles, current_stack_level)
+                        except Exception as e:
+                            print(f"[STACK] Place failed: {e}")
+                            # Emit fault event
+                            fault_result = step(STATE, Event.FAULT)
+                            if fault_result.allowed:
+                                STATE = fault_result.next_state
+                                print(f"[SM] -> {STATE.name} (FAULT)")
                             continue
 
-                        do_nudge(dx, dy)
-                        continue
+                        # Update stack counters only on success
+                        current_stack_level += 1
+                        current_pick_index += 1
 
-                    if msg == "DROP":
-                        do_drop()
-                        continue
+                        # Emit internal progression event
+                        result4 = step(STATE, Event.PLACE_COMPLETE)
+                        if result4.allowed:
+                            STATE = result4.next_state
+                            print(f"[SM] -> {STATE.name} (PLACE_COMPLETE)")
 
-                    # --- Gripper commands ---
-                    if msg == "GRIP_TOGGLE":
-                        do_grip_toggle()
-                        continue
+                    elif event == Event.CANCEL:
+                        # returns to WAITING_FOR_DECISION by state machine; no motion needed
+                        pass
 
-                    if msg == "GRIP_OPEN":
-                        do_grip_open()
-                        continue
+                    elif event == Event.GRIP_OPEN:
+                        actions.do_grip_open(handles)
 
-                    if msg == "GRIP_CLOSE":
-                        do_grip_close()
-                        continue
+                    elif event == Event.GRIP_CLOSE:
+                        actions.do_grip_close(handles)
 
-                    print(f"[CONTROL] Unknown command: {msg}")
+                    elif event == Event.GRIP_TOGGLE:
+                        actions.do_grip_toggle(handles)
 
         except Exception as e:
             print(f"[CONTROL] Connection error: {e}")
@@ -385,8 +352,14 @@ def command_server():
             except:
                 pass
 
+            # NOTE: handles.gripper.close() not called here because close() is used for
+            # gripper actuation (closing the grip) and would cause unintended physical motion.
+            # Gripper disconnection is handled by gripper_connected flag reset and eventual
+            # reconnection on next VR session.
+
             robot_armed = False
-            print("[CONTROL] VR disconnected. Robot disarmed.")
+            STATE = State.IDLE
+            print("[CONTROL] VR disconnected. Robot disarmed. STATE reset to IDLE.")
 
             # Keep the gripper connection status conservative:
             # If Unity reconnects, we'll re-attempt connect.

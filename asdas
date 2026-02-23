@@ -1,0 +1,537 @@
+[1mdiff --git a/Robotics/motion/R4_Hover b/Robotics/motion/R4_Hover[m
+[1mdeleted file mode 100644[m
+[1mindex e69de29..0000000[m
+[1mdiff --git a/Robotics/motion/dobot_driver.py b/Robotics/motion/dobot_driver.py[m
+[1mindex 1e4ef02..051accf 100644[m
+[1m--- a/Robotics/motion/dobot_driver.py[m
+[1m+++ b/Robotics/motion/dobot_driver.py[m
+[36m@@ -1,24 +1,14 @@[m
+ """[m
+ dobot_driver.py[m
+[31m-Dobot Magician E6 Dashboard TCP driver (port 29999) + gripper primitives.[m
+ [m
+[31m-Verified on your controller:[m
+[31m-- ToolDOExecute(...) is NOT supported (returns -10000)[m
+[31m-- ToolDO(...) IS supported (queued) and returns a queue id[m
+[31m-- DO(...) IS supported (queued) and returns a queue id[m
+[31m-- Continue() IS supported and is required to execute queued commands[m
+[32m+[m[32mDobot Magician E6 Dashboard TCP driver (port 29999).[m
+ [m
+[31m-Verified on your hardware wiring + behaviour:[m
+[31m-- DH Robotics PGE5 gripper is connected to the BASE I/O (not wrist/tool flange)[m
+[31m-- Gripper responds to BASE DO_1 after DH UI Init (I/O Mode ON)[m
+[31m-- Behaviour suggests edge-trigger / pulse style control (twitch then returns if we treat DO as a level)[m
+[32m+[m[32mDev 7+ note:[m
+[32m+[m[32m- Gripper control has moved to RS485 Modbus (see dh_gripper.py).[m
+[32m+[m[32m- This driver is now arm/motion-focused.[m
+[32m+[m[32m- DO/ToolDO helpers remain for general I/O, but are NOT "the gripper".[m
+ [m
+[31m-Therefore, gripper control is implemented as:[m
+[31m-    PULSE on DO(GRIP_DO_INDEX) using DO(...) -> Continue()[m
+[31m-[m
+[31m-NOTE:[m
+[31m-- This driver does NOT (yet) automate DH "Init" sequence. You must Init in DH-Robotics UI first.[m
+[31m-- For deterministic open/close (instead of toggle), we will later read DI feedback and pulse-until-state.[m
+[32m+[m[32mThis driver uses a persistent TCP socket to avoid rapid connect/disconnect issues.[m
+ """[m
+ [m
+ import socket[m
+[36m@@ -31,7 +21,8 @@[m [mPose = Tuple[float, float, float, float, float, float][m
+ [m
+ def _try_import_robot_config():[m
+     """[m
+[31m-    Optional config hook: if you already have robot_config.py, we use it.[m
+[32m+[m[32m    Optional config hook:[m
+[32m+[m[32m    If robot_config.py exists, use it.[m
+     Otherwise fall back to safe defaults.[m
+     """[m
+     try:[m
+[36m@@ -70,22 +61,7 @@[m [mclass DobotDriver:[m
+         self.port = dashboard_port or self.DASHBOARD_PORT[m
+         self.timeout_s = timeout_s or self.SOCKET_TIMEOUT_S[m
+ [m
+[31m-        # ----------------------------[m
+[31m-        # Gripper config (BASE DO) — YOUR real wiring[m
+[31m-        # ----------------------------[m
+[31m-        # You verified it responds to DO_1 in DobotStudio after DH UI Init.[m
+[31m-        self.GRIP_DO_INDEX = getattr(_cfg, "GRIP_DO_INDEX", 1)[m
+[31m-[m
+[31m-        # Pulse timing (tweakable)[m
+[31m-        self.GRIP_PULSE_WIDTH_S = getattr(_cfg, "GRIP_PULSE_WIDTH_S", 0.25)[m
+[31m-        self.GRIP_SETTLE_S = getattr(_cfg, "GRIP_SETTLE_S", 0.35)[m
+[31m-[m
+[31m-        # Pulse shape:[m
+[31m-        # pulse_high=True means: ensure low -> high -> low[m
+[31m-        # If your installation expects inverse edges, set to False in robot_config.py[m
+[31m-        self.GRIP_PULSE_HIGH = getattr(_cfg, "GRIP_PULSE_HIGH", True)[m
+[31m-[m
+[31m-        # Persistent dashboard socket (prevents connect/disconnect spam)[m
+[32m+[m[32m        # Persistent dashboard socket[m
+         self._sock: Optional[socket.socket] = None[m
+ [m
+     # ----------------------------[m
+[36m@@ -94,7 +70,6 @@[m [mclass DobotDriver:[m
+     def connect(self) -> None:[m
+         """[m
+         Open a persistent connection to the dashboard server.[m
+[31m-        This avoids rapid connect/disconnect causing 'port occupied' errors.[m
+         """[m
+         if self._sock is not None:[m
+             return[m
+[36m@@ -115,19 +90,18 @@[m [mclass DobotDriver:[m
+             self._sock = None[m
+ [m
+     def __del__(self):[m
+[31m-        # Best-effort cleanup if user forgets to close()[m
+         try:[m
+             self.close()[m
+         except Exception:[m
+             pass[m
+ [m
+     # ----------------------------[m
+[31m-    # Core TCP/IP send (persistent)[m
+[32m+[m[32m    # Core TCP send (persistent)[m
+     # ----------------------------[m
+     def send(self, cmd: str) -> str:[m
+         """[m
+         Send a single dashboard command and return the raw response.[m
+[31m-        Reuses a persistent socket connection.[m
+[32m+[m[32m        Retries once on connection failure.[m
+         """[m
+         cmd = cmd.strip()[m
+         payload = (cmd + "\n").encode("utf-8")[m
+[36m@@ -141,7 +115,7 @@[m [mclass DobotDriver:[m
+             resp = self._sock.recv(4096).decode("utf-8", errors="ignore").strip()[m
+             return resp[m
+         except (socket.timeout, ConnectionError, OSError):[m
+[31m-            # If the connection died or got weird, reset once and retry.[m
+[32m+[m[32m            # Reset and retry once[m
+             self.close()[m
+             self.connect()[m
+             assert self._sock is not None[m
+[36m@@ -156,7 +130,7 @@[m [mclass DobotDriver:[m
+     def _assert_ok(resp: str, cmd: str) -> None:[m
+         """[m
+         Success responses typically start with '0,'.[m
+[31m-        Example: '0,{},EnableRobot();' or '0,{126},DO(1,1);'[m
+[32m+[m[32m        Example: '0,{},EnableRobot();'[m
+         """[m
+         if resp is None or resp == "":[m
+             raise RuntimeError(f"No response for: {cmd}")[m
+[36m@@ -187,7 +161,8 @@[m [mclass DobotDriver:[m
+ [m
+     def clear_and_enable(self, speed_percent: Optional[int] = None) -> None:[m
+         """[m
+[31m-        Convenience: clears error, enables, and sets speed.[m
+[32m+[m[32m        Convenience: ClearError + EnableRobot + optional SpeedFactor.[m
+[32m+[m[32m        Intended to be called once per VR session, not per command.[m
+         """[m
+         print(f"[DOBOT] ClearError -> {self.clear_error()}")[m
+         print(f"[DOBOT] EnableRobot -> {self.enable()}")[m
+[36m@@ -198,7 +173,7 @@[m [mclass DobotDriver:[m
+         time.sleep(0.2)[m
+ [m
+     # ----------------------------[m
+[31m-    # Queue execution control (YOUR firmware supports Continue())[m
+[32m+[m[32m    # Queue execution control[m
+     # ----------------------------[m
+     def continue_queue(self) -> str:[m
+         cmd = "Continue()"[m
+[36m@@ -206,13 +181,76 @@[m [mclass DobotDriver:[m
+         self._assert_ok(resp, cmd)[m
+         return resp[m
+ [m
+[32m+[m[32m    def robot_mode(self) -> int:[m
+[32m+[m[32m        """[m
+[32m+[m[32m        Query the robot mode via Dashboard `RobotMode()` command.[m
+[32m+[m
+[32m+[m[32m        Returns the integer mode on success, or -1 on parse failure.[m
+[32m+[m[32m        Expected response format: ErrorID,{value},RobotMode();[m
+[32m+[m[32m        """[m
+[32m+[m[32m        cmd = "RobotMode()"[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            resp = self.send(cmd)[m
+[32m+[m[32m        except Exception as e:[m
+[32m+[m[32m            print(f"[DOBOT] RobotMode() failed: {e}")[m
+[32m+[m[32m            return -1[m
+[32m+[m
+[32m+[m[32m        # Try to parse second CSV field as integer[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            parts = resp.split(',')[m
+[32m+[m[32m            if len(parts) >= 2:[m
+[32m+[m[32m                val = parts[1].strip()[m
+[32m+[m[32m                # Remove any non-digit characters (defensive)[m
+[32m+[m[32m                # but allow negative sign if present[m
+[32m+[m[32m                filtered = ''.join(ch for ch in val if (ch.isdigit() or ch == '-'))[m
+[32m+[m[32m                if filtered == '' or filtered == '-' or filtered is None:[m
+[32m+[m[32m                    raise ValueError(f"No numeric value in RobotMode response: {resp}")[m
+[32m+[m[32m                return int(filtered)[m
+[32m+[m[32m        except Exception as e:[m
+[32m+[m[32m            print(f"[DOBOT] Failed to parse RobotMode() response '{resp}': {e}")[m
+[32m+[m[32m            return -1[m
+[32m+[m
+[32m+[m[32m    def wait_until_idle(self, timeout_s: float = 30.0, poll_s: float = 0.1) -> None:[m
+[32m+[m[32m        """[m
+[32m+[m[32m        Poll `RobotMode()` until the robot reports an idle-like mode.[m
+[32m+[m[32m        Treat mode==5 as idle. Logs observed modes. If parsing fails,[m
+[32m+[m[32m        falls back to a conservative short sleep and returns.[m
+[32m+[m[32m        If mode indicates ERROR (9) or COLLISION (11), warn and return early.[m
+[32m+[m[32m        """[m
+[32m+[m[32m        start = time.time()[m
+[32m+[m[32m        last_mode = None[m
+[32m+[m[32m        while True:[m
+[32m+[m[32m            mode = self.robot_mode()[m
+[32m+[m[32m            if mode >= 0:[m
+[32m+[m[32m                if mode != last_mode:[m
+[32m+[m[32m                    print(f"[DOBOT] RobotMode -> {mode}")[m
+[32m+[m[32m                    last_mode = mode[m
+[32m+[m[32m                # Treat 5 as idle (ROBOT_MODE_ENABLE). Do NOT treat 0 as idle.[m
+[32m+[m[32m                if mode == 5:[m
+[32m+[m[32m                    return[m
+[32m+[m[32m                # Handle error/collision modes conservatively[m
+[32m+[m[32m                if mode in (9, 11):[m
+[32m+[m[32m                    print(f"[DOBOT] RobotMode indicates fault/collision: {mode}")[m
+[32m+[m[32m                    return[m
+[32m+[m[32m            else:[m
+[32m+[m[32m                # Parsing failed; fallback[m
+[32m+[m[32m                print("[DOBOT] RobotMode parsing failed; falling back to short sleep")[m
+[32m+[m[32m                time.sleep(0.5)[m
+[32m+[m[32m                return[m
+[32m+[m
+[32m+[m[32m            if (time.time() - start) > timeout_s:[m
+[32m+[m[32m                print(f"[DOBOT] wait_until_idle timeout after {timeout_s}s (last mode={mode})")[m
+[32m+[m[32m                return[m
+[32m+[m
+[32m+[m[32m            time.sleep(poll_s)[m
+[32m+[m
+     # ----------------------------[m
+     # Digital outputs (queued)[m
+     # ----------------------------[m
+     def tool_do(self, index: int, status: int, execute: bool = True) -> str:[m
+         """[m
+         Tool digital output (queued): ToolDO(index,status)[m
+[31m-        Not used for your current gripper wiring, but kept for future tooling.[m
+[32m+[m[32m        Not used for the current gripper wiring (Dev 7+ uses RS485).[m
+         """[m
+         status = 1 if status else 0[m
+         cmd = f"ToolDO({index},{status})"[m
+[36m@@ -225,7 +263,7 @@[m [mclass DobotDriver:[m
+     def do(self, index: int, status: int, execute: bool = True) -> str:[m
+         """[m
+         Base/controller digital output (queued): DO(index,status)[m
+[31m-        Your gripper is on BASE DO_1.[m
+[32m+[m[32m        Kept for generic I/O use.[m
+         """[m
+         status = 1 if status else 0[m
+         cmd = f"DO({index},{status})"[m
+[36m@@ -236,67 +274,7 @@[m [mclass DobotDriver:[m
+         return resp[m
+ [m
+     # ----------------------------[m
+[31m-    # Gripper primitives (BASE DO pulse + Continue)[m
+[31m-    # IMPORTANT:[m
+[31m-    # - DH UI Init must already have been performed (IO Mode ON).[m
+[31m-    # - Without DI feedback, open/close are treated as TOGGLE pulses.[m
+[31m-    # ----------------------------[m
+[31m-    def pulse_do(self, index: int, width_s: Optional[float] = None, pulse_high: Optional[bool] = None) -> None:[m
+[31m-        """[m
+[31m-        Generate a clean pulse on DO(index).[m
+[31m-[m
+[31m-        pulse_high=True : ensure low -> high -> low[m
+[31m-        pulse_high=False: ensure high -> low -> high[m
+[31m-        """[m
+[31m-        if width_s is None:[m
+[31m-            width_s = self.GRIP_PULSE_WIDTH_S[m
+[31m-        if pulse_high is None:[m
+[31m-            pulse_high = self.GRIP_PULSE_HIGH[m
+[31m-[m
+[31m-        on = 1 if pulse_high else 0[m
+[31m-        off = 0 if pulse_high else 1[m
+[31m-[m
+[31m-        # Ensure known starting level (best-effort)[m
+[31m-        r = self.do(index, off, execute=False)[m
+[31m-        print(f"[GRIPPER] DO({index},{off}) -> {r}")[m
+[31m-        print(f"[GRIPPER] Continue -> {self.continue_queue()}")[m
+[31m-        time.sleep(0.05)[m
+[31m-[m
+[31m-        # Pulse ON[m
+[31m-        r = self.do(index, on, execute=False)[m
+[31m-        print(f"[GRIPPER] DO({index},{on}) -> {r}")[m
+[31m-        print(f"[GRIPPER] Continue -> {self.continue_queue()}")[m
+[31m-        time.sleep(width_s)[m
+[31m-[m
+[31m-        # Return OFF[m
+[31m-        r = self.do(index, off, execute=False)[m
+[31m-        print(f"[GRIPPER] DO({index},{off}) -> {r}")[m
+[31m-        print(f"[GRIPPER] Continue -> {self.continue_queue()}")[m
+[31m-        time.sleep(0.05)[m
+[31m-[m
+[31m-        # Let mechanics settle[m
+[31m-        time.sleep(self.GRIP_SETTLE_S)[m
+[31m-[m
+[31m-    def grip_toggle(self) -> None:[m
+[31m-        print(f"[GRIPPER] PULSE TOGGLE on DO({self.GRIP_DO_INDEX})")[m
+[31m-        self.pulse_do(self.GRIP_DO_INDEX)[m
+[31m-[m
+[31m-    def grip_open(self) -> None:[m
+[31m-        """[m
+[31m-        TEMPORARY: Without DI feedback we cannot guarantee state.[m
+[31m-        Treat open/close as toggle pulses.[m
+[31m-        """[m
+[31m-        self.grip_toggle()[m
+[31m-[m
+[31m-    def grip_close(self) -> None:[m
+[31m-        """[m
+[31m-        TEMPORARY: Without DI feedback we cannot guarantee state.[m
+[31m-        Treat open/close as toggle pulses.[m
+[31m-        """[m
+[31m-        self.grip_toggle()[m
+[31m-[m
+[31m-    # ----------------------------[m
+[31m-    # Motion primitives (optional / minimal)[m
+[32m+[m[32m    # Motion primitives[m
+     # ----------------------------[m
+     @staticmethod[m
+     def _pose_to_cmd(pose: Pose) -> str:[m
+[36m@@ -308,27 +286,46 @@[m [mclass DobotDriver:[m
+         resp = self.send(cmd)[m
+         self._assert_ok(resp, cmd)[m
+         self.continue_queue()[m
+[32m+[m[32m        # Wait until motion completes (replace Sync())[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            self.wait_until_idle()[m
+[32m+[m[32m        except Exception as e:[m
+[32m+[m[32m            print(f"[DOBOT] wait_until_idle failed after MovJ: {e}")[m
+         return resp[m
+ [m
+     def movl_pose(self, pose: Pose) -> str:[m
+         """[m
+[31m-        Linear move in Cartesian space (straight-line path), like DobotStudio 'Linear' mode.[m
+[32m+[m[32m        Linear move in Cartesian space (straight-line path).[m
+         """[m
+         cmd = f"MovL({self._pose_to_cmd(pose)})"[m
+         resp = self.send(cmd)[m
+         self._assert_ok(resp, cmd)[m
+         self.continue_queue()[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            self.wait_until_idle()[m
+[32m+[m[32m        except Exception as e:[m
+[32m+[m[32m            print(f"[DOBOT] wait_until_idle failed after MovL: {e}")[m
+         return resp[m
+ [m
+     def relmovl_user(self, dx: float, dy: float, dz: float, drx: float, dry: float, drz: float) -> str:[m
+[32m+[m[32m        """[m
+[32m+[m[32m        Relative linear move in user/base frame (used for NUDGE and small controlled descents).[m
+[32m+[m[32m        """[m
+         cmd = f"RelMovLUser({dx},{dy},{dz},{drx},{dry},{drz})"[m
+         resp = self.send(cmd)[m
+         self._assert_ok(resp, cmd)[m
+         self.continue_queue()[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            self.wait_until_idle()[m
+[32m+[m[32m        except Exception as e:[m
+[32m+[m[32m            print(f"[DOBOT] wait_until_idle failed after RelMovLUser: {e}")[m
+         return resp[m
+ [m
+     def go_home(self, speed_percent: Optional[int] = None) -> str:[m
+[32m+[m[32m        """[m
+[32m+[m[32m        Move to SAFE_HOME_POSE at precision speed by default.[m
+[32m+[m[32m        """[m
+         if speed_percent is None:[m
+             speed_percent = self.SPEED_PRECISION[m
+         self.speed_factor(speed_percent)[m
+[31m-        return self.movj_pose(self.SAFE_HOME_POSE)[m
+[32m+[m[32m        return self.movj_pose(self.SAFE_HOME_POSE)[m
+\ No newline at end of file[m
+[1mdiff --git a/Robotics/motion/gripper_driver_test_obvious.py b/Robotics/motion/gripper_driver_test_obvious.py[m
+[1mdeleted file mode 100644[m
+[1mindex 5095b7b..0000000[m
+[1m--- a/Robotics/motion/gripper_driver_test_obvious.py[m
+[1m+++ /dev/null[m
+[36m@@ -1,25 +0,0 @@[m
+[31m-from dh_gripper import DHGripperPGE[m
+[31m-import time[m
+[31m-[m
+[31m-g = DHGripperPGE(open_pos=900, close_pos=50)[m
+[31m-[m
+[31m-print("Connecting...")[m
+[31m-if not g.connect():[m
+[31m-    print("Failed to connect")[m
+[31m-    raise SystemExit(1)[m
+[31m-[m
+[31m-print("\nInitial status:", g.status())[m
+[31m-time.sleep(2)[m
+[31m-[m
+[31m-print("\nCOMMAND: OPEN (900). Watch it move now.")[m
+[31m-st = g.open(timeout_s=5)[m
+[31m-print("After OPEN:", st)[m
+[31m-time.sleep(3)[m
+[31m-[m
+[31m-print("\nCOMMAND: CLOSE (50). Watch it move now.")[m
+[31m-st = g.close(timeout_s=5)[m
+[31m-print("After CLOSE:", st)[m
+[31m-time.sleep(2)[m
+[31m-[m
+[31m-g.close()[m
+[31m-print("\nDone. Connection closed.")[m
+[1mdiff --git a/Robotics/motion/gripper_hold_open_watch.py b/Robotics/motion/gripper_hold_open_watch.py[m
+[1mdeleted file mode 100644[m
+[1mindex aa9ce4c..0000000[m
+[1m--- a/Robotics/motion/gripper_hold_open_watch.py[m
+[1m+++ /dev/null[m
+[36m@@ -1,22 +0,0 @@[m
+[31m-import time[m
+[31m-from dh_gripper import DHGripperPGE[m
+[31m-[m
+[31m-def main():[m
+[31m-    g = DHGripperPGE(open_pos=900, close_pos=50)[m
+[31m-    if not g.connect():[m
+[31m-        raise RuntimeError("connect failed")[m
+[31m-[m
+[31m-    print("Status after connect:", g.status())[m
+[31m-[m
+[31m-    print("\nFORCE OPEN now.")[m
+[31m-    g.open(timeout_s=5)[m
+[31m-    time.sleep(0.2)[m
+[31m-    print("Status after open:", g.status())[m
+[31m-[m
+[31m-    print("\nWatching for 15 seconds. If it moves, something else is controlling it or it’s not holding.")[m
+[31m-    for i in range(30):[m
+[31m-        time.sleep(0.5)[m
+[31m-        print(f"t={0.5*(i+1):4.1f}s  status={g.status()}")[m
+[31m-[m
+[31m-if __name__ == "__main__":[m
+[31m-    main()[m
+[1mdiff --git a/Robotics/motion/robot_config.py b/Robotics/motion/robot_config.py[m
+[1mindex 2318928..05b9116 100644[m
+[1m--- a/Robotics/motion/robot_config.py[m
+[1m+++ b/Robotics/motion/robot_config.py[m
+[36m@@ -1,56 +1,140 @@[m
+ """[m
+ robot_config.py[m
+[31m-Central configuration for Side Quest robot control.[m
+[32m+[m[32mCentral configuration for Side Quest robot + gripper control.[m
+ [m
+[31m-Keep ALL "magic numbers" here:[m
+[31m-- IPs/ports[m
+[31m-- poses[m
+[32m+[m[32mKeep ALL magic numbers here:[m
+[32m+[m[32m- network/IP/ports[m
+ - speed profiles[m
+[32m+[m[32m- canonical poses[m
+ - nudge step sizes[m
+[32m+[m[32m- gripper RS485 parameters (Dev 7+)[m
+[32m+[m
+[32m+[m[32mUnits:[m
+[32m+[m[32m- Poses: mm and degrees (Dobot dashboard convention)[m
+ """[m
+ [m
+ # ----------------------------[m
+[31m-# Network / Dobot Controller[m
+[32m+[m[32m# Network / Dobot Dashboard[m
+ # ----------------------------[m
+ ROBOT_IP = "192.168.5.1"[m
+ DASHBOARD_PORT = 29999[m
+[32m+[m[32mSOCKET_TIMEOUT_S = 5.0[m
+ [m
+ # ----------------------------[m
+ # Speed Profiles (SpeedFactor %)[m
+ # ----------------------------[m
+[31m-SPEED_TRAVEL = 30        # used for larger moves (home <-> pick <-> hover)[m
+[31m-SPEED_PRECISION = 15     # used for nudges + placing (fine motion)[m
+[32m+[m[32mSPEED_TRAVEL = 30        # larger moves (home <-> pick <-> hover)[m
+[32m+[m[32mSPEED_PRECISION = 15     # nudges + placing (fine motion)[m
+ [m
+[31m-# Combo mode (future): add +10–20% on travel only[m
+[31m-COMBO_SPEED_BONUS = 10   # example: travel becomes 40% when combo active[m
+[32m+[m[32m# Combo mode (future): +10–20% travel only[m
+[32m+[m[32mCOMBO_SPEED_BONUS = 10[m
+ [m
+ # ----------------------------[m
+ # Poses (Cartesian pose={x,y,z,rx,ry,rz})[m
+[31m-# Units: mm and degrees (Dobot convention)[m
+ # ----------------------------[m
+[31m-# Safe Home / Idle pose (you already tested raising Z by +100mm)[m
+[31m-SAFE_HOME_POSE = (350, 0, 300, 180, 0, 0)[m
+[32m+[m[32m# Safe Home / Idle pose (tested; adjust as needed)[m
+[32m+[m[32mSAFE_HOME_POSE = (273.2320, -23.7896, 378.5702, -180.0, 0.0, -124.0)[m
+[32m+[m[32mNEUTRAL_2 = (273.2320, -23.7896, 294.4369, -180.0, 0.0, -124.0)[m
+[32m+[m
+[32m+[m[32m# Placeholders — replace with measured/validated poses[m
+[32m+[m[32mPICK_POSE = (0, 0, 0, 0, 0, 0)     # TODO: fill[m
+[32m+[m[32mHOVER_POSE = (0, 0, 0, 0, 0, 0)    # TODO: fill[m
+ [m
+[31m-# Placeholders for Week 2 (fill once you measure them)[m
+[31m-PICK_POSE = (0, 0, 0, 0, 0, 0)     # TODO: replace[m
+[31m-HOVER_POSE = (0, 0, 0, 0, 0, 0)    # TODO: replace[m
+[32m+[m[32m# Optional: a safe "above-place" pose if you want one later[m
+[32m+[m[32m# PLACE_APPROACH_POSE = (...)[m
+ [m
+ # ----------------------------[m
+[31m-# Nudge Settings (Week 2)[m
+[32m+[m[32m# Nudge Settings[m
+ # ----------------------------[m
+[31m-# Discrete nudge step sizes[m
+ NUDGE_STEP_MM = 3         # XY step per button press[m
+ NUDGE_YAW_DEG = 2         # yaw step per button press (optional)[m
+[32m+[m[32mNUDGE_DZ_MM = 0           # Z locked by design[m
+[32m+[m
+[32m+[m[32m# ----------------------------[m
+[32m+[m[32m# Stacking (Deterministic Pick & Place)[m
+[32m+[m[32m# ----------------------------[m
+[32m+[m[32mPICK_CLEARANCE_MM = 40.0      # height above block before/after pick[m
+[32m+[m[32mPLACE_CLEARANCE_MM = 40.0     # height above tower during approach[m
+[32m+[m[32mBLOCK_HEIGHT_MM = 37.0        # physical block height[m
+[32m+[m
+[32m+[m[32m# Stacking sequence: list of (side, level) tuples defining pick order[m
+[32m+[m[32m# side: "L" (left) or "R" (right) source stack[m
+[32m+[m[32m# level: 1-indexed level on source stack[m
+[32m+[m[32mPICK_SEQUENCE = [[m
+[32m+[m[32m    ("L", 4),[m
+[32m+[m[32m    ("R", 3),[m
+[32m+[m[32m    ("L", 3),[m
+[32m+[m[32m    ("R", 2),[m
+[32m+[m[32m    ("L", 2),[m
+[32m+[m[32m    ("R", 1),[m
+[32m+[m[32m    ("L", 1),[m
+[32m+[m[32m][m
+[32m+[m
+[32m+[m[32m# Tower capacity[m
+[32m+[m[32mTOWER_LEVELS = 7[m
+[32m+[m
+[32m+[m[32m# Pick positions (left & right source stacks) - measured/calibrated[m
+[32m+[m[32mLEFT_PICK_BASE = (273.2320, 49.1437, 155.6196, -180.0, 0.0, -124.0)[m
+[32m+[m[32mRIGHT_PICK_BASE = (362.9314, 49.1437, 155.8725, -180.0, 0.0, -124.0)[m
+[32m+[m[32mLEFT_PICK_STEP_MM = 37.0                   # height step per level (left stack)[m
+[32m+[m[32mRIGHT_PICK_STEP_MM = 36.6                  # height step per level (right stack)[m
+[32m+[m
+[32m+[m[32m# Tower position (destination) - measured/calibrated[m
+[32m+[m[32mTOWER_BASE_POSE = (193.4597, -91.4552, 157.8142, 180.0, 0.0, -124.0)[m
+[32m+[m
+[32m+[m[32m# ----------------------------[m
+[32m+[m[32m# Gripper (Dev 7+) — RS485 Modbus RTU[m
+[32m+[m[32m# ----------------------------[m
+[32m+[m[32m# NOTE: The gripper is no longer controlled via Dobot DO pulses.[m
+[32m+[m[32m# It is controlled directly by the Raspberry Pi over RS485 (FT232).[m
+[32m+[m
+[32m+[m[32mGRIPPER_PORT = "/dev/ttyUSB0"[m
+[32m+[m[32mGRIPPER_BAUDRATE = 115200[m
+[32m+[m[32mGRIPPER_SLAVE_ID = 1[m
+[32m+[m
+[32m+[m[32m# Deterministic positions (0..1000 scale per DH PGE docs)[m
+[32m+[m[32mGRIPPER_OPEN_POS = 900[m
+[32m+[m[32mGRIPPER_CLOSE_POS = 50[m
+[32m+[m
+[32m+[m[32m# Driver behaviour[m
+[32m+[m[32mGRIPPER_COMMAND_TIMEOUT_S = 3.0    # max time to wait for move completion[m
+[32m+[m[32mGRIPPER_POLL_PERIOD_S = 0.05       # status poll interval during move[m
+ [m
+[31m-# Z is locked during nudge by design[m
+[31m-NUDGE_DZ_MM = 0[m
+ [m
+ # ----------------------------[m
+[31m-# Gripper I/O (NOT IMPLEMENTED YET)[m
+[32m+[m[32m# Helper Functions: Stacking Poses[m
+ # ----------------------------[m
+[31m-# You controlled it via Controller DO/DO panel in DobotStudio.[m
+[31m-# We still need to confirm which DO ch

@@ -1,24 +1,14 @@
 """
 dobot_driver.py
-Dobot Magician E6 Dashboard TCP driver (port 29999) + gripper primitives.
 
-Verified on your controller:
-- ToolDOExecute(...) is NOT supported (returns -10000)
-- ToolDO(...) IS supported (queued) and returns a queue id
-- DO(...) IS supported (queued) and returns a queue id
-- Continue() IS supported and is required to execute queued commands
+Dobot Magician E6 Dashboard TCP driver (port 29999).
 
-Verified on your hardware wiring + behaviour:
-- DH Robotics PGE5 gripper is connected to the BASE I/O (not wrist/tool flange)
-- Gripper responds to BASE DO_1 after DH UI Init (I/O Mode ON)
-- Behaviour suggests edge-trigger / pulse style control (twitch then returns if we treat DO as a level)
+Dev 7+ note:
+- Gripper control has moved to RS485 Modbus (see dh_gripper.py).
+- This driver is now arm/motion-focused.
+- DO/ToolDO helpers remain for general I/O, but are NOT "the gripper".
 
-Therefore, gripper control is implemented as:
-    PULSE on DO(GRIP_DO_INDEX) using DO(...) -> Continue()
-
-NOTE:
-- This driver does NOT (yet) automate DH "Init" sequence. You must Init in DH-Robotics UI first.
-- For deterministic open/close (instead of toggle), we will later read DI feedback and pulse-until-state.
+This driver uses a persistent TCP socket to avoid rapid connect/disconnect issues.
 """
 
 import socket
@@ -31,7 +21,8 @@ Pose = Tuple[float, float, float, float, float, float]
 
 def _try_import_robot_config():
     """
-    Optional config hook: if you already have robot_config.py, we use it.
+    Optional config hook:
+    If robot_config.py exists, use it.
     Otherwise fall back to safe defaults.
     """
     try:
@@ -70,22 +61,7 @@ class DobotDriver:
         self.port = dashboard_port or self.DASHBOARD_PORT
         self.timeout_s = timeout_s or self.SOCKET_TIMEOUT_S
 
-        # ----------------------------
-        # Gripper config (BASE DO) — YOUR real wiring
-        # ----------------------------
-        # You verified it responds to DO_1 in DobotStudio after DH UI Init.
-        self.GRIP_DO_INDEX = getattr(_cfg, "GRIP_DO_INDEX", 1)
-
-        # Pulse timing (tweakable)
-        self.GRIP_PULSE_WIDTH_S = getattr(_cfg, "GRIP_PULSE_WIDTH_S", 0.25)
-        self.GRIP_SETTLE_S = getattr(_cfg, "GRIP_SETTLE_S", 0.35)
-
-        # Pulse shape:
-        # pulse_high=True means: ensure low -> high -> low
-        # If your installation expects inverse edges, set to False in robot_config.py
-        self.GRIP_PULSE_HIGH = getattr(_cfg, "GRIP_PULSE_HIGH", True)
-
-        # Persistent dashboard socket (prevents connect/disconnect spam)
+        # Persistent dashboard socket
         self._sock: Optional[socket.socket] = None
 
     # ----------------------------
@@ -94,7 +70,6 @@ class DobotDriver:
     def connect(self) -> None:
         """
         Open a persistent connection to the dashboard server.
-        This avoids rapid connect/disconnect causing 'port occupied' errors.
         """
         if self._sock is not None:
             return
@@ -115,19 +90,18 @@ class DobotDriver:
             self._sock = None
 
     def __del__(self):
-        # Best-effort cleanup if user forgets to close()
         try:
             self.close()
         except Exception:
             pass
 
     # ----------------------------
-    # Core TCP/IP send (persistent)
+    # Core TCP send (persistent)
     # ----------------------------
     def send(self, cmd: str) -> str:
         """
         Send a single dashboard command and return the raw response.
-        Reuses a persistent socket connection.
+        Retries once on connection failure.
         """
         cmd = cmd.strip()
         payload = (cmd + "\n").encode("utf-8")
@@ -141,7 +115,7 @@ class DobotDriver:
             resp = self._sock.recv(4096).decode("utf-8", errors="ignore").strip()
             return resp
         except (socket.timeout, ConnectionError, OSError):
-            # If the connection died or got weird, reset once and retry.
+            # Reset and retry once
             self.close()
             self.connect()
             assert self._sock is not None
@@ -156,7 +130,7 @@ class DobotDriver:
     def _assert_ok(resp: str, cmd: str) -> None:
         """
         Success responses typically start with '0,'.
-        Example: '0,{},EnableRobot();' or '0,{126},DO(1,1);'
+        Example: '0,{},EnableRobot();'
         """
         if resp is None or resp == "":
             raise RuntimeError(f"No response for: {cmd}")
@@ -187,7 +161,8 @@ class DobotDriver:
 
     def clear_and_enable(self, speed_percent: Optional[int] = None) -> None:
         """
-        Convenience: clears error, enables, and sets speed.
+        Convenience: ClearError + EnableRobot + optional SpeedFactor.
+        Intended to be called once per VR session, not per command.
         """
         print(f"[DOBOT] ClearError -> {self.clear_error()}")
         print(f"[DOBOT] EnableRobot -> {self.enable()}")
@@ -198,7 +173,7 @@ class DobotDriver:
         time.sleep(0.2)
 
     # ----------------------------
-    # Queue execution control (YOUR firmware supports Continue())
+    # Queue execution control
     # ----------------------------
     def continue_queue(self) -> str:
         cmd = "Continue()"
@@ -206,13 +181,76 @@ class DobotDriver:
         self._assert_ok(resp, cmd)
         return resp
 
+    def robot_mode(self) -> int:
+        """
+        Query the robot mode via Dashboard `RobotMode()` command.
+
+        Returns the integer mode on success, or -1 on parse failure.
+        Expected response format: ErrorID,{value},RobotMode();
+        """
+        cmd = "RobotMode()"
+        try:
+            resp = self.send(cmd)
+        except Exception as e:
+            print(f"[DOBOT] RobotMode() failed: {e}")
+            return -1
+
+        # Try to parse second CSV field as integer
+        try:
+            parts = resp.split(',')
+            if len(parts) >= 2:
+                val = parts[1].strip()
+                # Remove any non-digit characters (defensive)
+                # but allow negative sign if present
+                filtered = ''.join(ch for ch in val if (ch.isdigit() or ch == '-'))
+                if filtered == '' or filtered == '-' or filtered is None:
+                    raise ValueError(f"No numeric value in RobotMode response: {resp}")
+                return int(filtered)
+        except Exception as e:
+            print(f"[DOBOT] Failed to parse RobotMode() response '{resp}': {e}")
+            return -1
+
+    def wait_until_idle(self, timeout_s: float = 30.0, poll_s: float = 0.1) -> None:
+        """
+        Poll `RobotMode()` until the robot reports an idle-like mode.
+        Treat mode==5 as idle. Logs observed modes. If parsing fails,
+        falls back to a conservative short sleep and returns.
+        If mode indicates ERROR (9) or COLLISION (11), warn and return early.
+        """
+        start = time.time()
+        last_mode = None
+        while True:
+            mode = self.robot_mode()
+            if mode >= 0:
+                if mode != last_mode:
+                    print(f"[DOBOT] RobotMode -> {mode}")
+                    last_mode = mode
+                # Treat 5 as idle (ROBOT_MODE_ENABLE). Do NOT treat 0 as idle.
+                if mode == 5:
+                    return
+                # Handle error/collision modes conservatively
+                if mode in (9, 11):
+                    print(f"[DOBOT] RobotMode indicates fault/collision: {mode}")
+                    return
+            else:
+                # Parsing failed; fallback
+                print("[DOBOT] RobotMode parsing failed; falling back to short sleep")
+                time.sleep(0.5)
+                return
+
+            if (time.time() - start) > timeout_s:
+                print(f"[DOBOT] wait_until_idle timeout after {timeout_s}s (last mode={mode})")
+                return
+
+            time.sleep(poll_s)
+
     # ----------------------------
     # Digital outputs (queued)
     # ----------------------------
     def tool_do(self, index: int, status: int, execute: bool = True) -> str:
         """
         Tool digital output (queued): ToolDO(index,status)
-        Not used for your current gripper wiring, but kept for future tooling.
+        Not used for the current gripper wiring (Dev 7+ uses RS485).
         """
         status = 1 if status else 0
         cmd = f"ToolDO({index},{status})"
@@ -225,7 +263,7 @@ class DobotDriver:
     def do(self, index: int, status: int, execute: bool = True) -> str:
         """
         Base/controller digital output (queued): DO(index,status)
-        Your gripper is on BASE DO_1.
+        Kept for generic I/O use.
         """
         status = 1 if status else 0
         cmd = f"DO({index},{status})"
@@ -236,67 +274,7 @@ class DobotDriver:
         return resp
 
     # ----------------------------
-    # Gripper primitives (BASE DO pulse + Continue)
-    # IMPORTANT:
-    # - DH UI Init must already have been performed (IO Mode ON).
-    # - Without DI feedback, open/close are treated as TOGGLE pulses.
-    # ----------------------------
-    def pulse_do(self, index: int, width_s: Optional[float] = None, pulse_high: Optional[bool] = None) -> None:
-        """
-        Generate a clean pulse on DO(index).
-
-        pulse_high=True : ensure low -> high -> low
-        pulse_high=False: ensure high -> low -> high
-        """
-        if width_s is None:
-            width_s = self.GRIP_PULSE_WIDTH_S
-        if pulse_high is None:
-            pulse_high = self.GRIP_PULSE_HIGH
-
-        on = 1 if pulse_high else 0
-        off = 0 if pulse_high else 1
-
-        # Ensure known starting level (best-effort)
-        r = self.do(index, off, execute=False)
-        print(f"[GRIPPER] DO({index},{off}) -> {r}")
-        print(f"[GRIPPER] Continue -> {self.continue_queue()}")
-        time.sleep(0.05)
-
-        # Pulse ON
-        r = self.do(index, on, execute=False)
-        print(f"[GRIPPER] DO({index},{on}) -> {r}")
-        print(f"[GRIPPER] Continue -> {self.continue_queue()}")
-        time.sleep(width_s)
-
-        # Return OFF
-        r = self.do(index, off, execute=False)
-        print(f"[GRIPPER] DO({index},{off}) -> {r}")
-        print(f"[GRIPPER] Continue -> {self.continue_queue()}")
-        time.sleep(0.05)
-
-        # Let mechanics settle
-        time.sleep(self.GRIP_SETTLE_S)
-
-    def grip_toggle(self) -> None:
-        print(f"[GRIPPER] PULSE TOGGLE on DO({self.GRIP_DO_INDEX})")
-        self.pulse_do(self.GRIP_DO_INDEX)
-
-    def grip_open(self) -> None:
-        """
-        TEMPORARY: Without DI feedback we cannot guarantee state.
-        Treat open/close as toggle pulses.
-        """
-        self.grip_toggle()
-
-    def grip_close(self) -> None:
-        """
-        TEMPORARY: Without DI feedback we cannot guarantee state.
-        Treat open/close as toggle pulses.
-        """
-        self.grip_toggle()
-
-    # ----------------------------
-    # Motion primitives (optional / minimal)
+    # Motion primitives
     # ----------------------------
     @staticmethod
     def _pose_to_cmd(pose: Pose) -> str:
@@ -308,26 +286,45 @@ class DobotDriver:
         resp = self.send(cmd)
         self._assert_ok(resp, cmd)
         self.continue_queue()
+        # Wait until motion completes (replace Sync())
+        try:
+            self.wait_until_idle()
+        except Exception as e:
+            print(f"[DOBOT] wait_until_idle failed after MovJ: {e}")
         return resp
 
     def movl_pose(self, pose: Pose) -> str:
         """
-        Linear move in Cartesian space (straight-line path), like DobotStudio 'Linear' mode.
+        Linear move in Cartesian space (straight-line path).
         """
         cmd = f"MovL({self._pose_to_cmd(pose)})"
         resp = self.send(cmd)
         self._assert_ok(resp, cmd)
         self.continue_queue()
+        try:
+            self.wait_until_idle()
+        except Exception as e:
+            print(f"[DOBOT] wait_until_idle failed after MovL: {e}")
         return resp
 
     def relmovl_user(self, dx: float, dy: float, dz: float, drx: float, dry: float, drz: float) -> str:
+        """
+        Relative linear move in user/base frame (used for NUDGE and small controlled descents).
+        """
         cmd = f"RelMovLUser({dx},{dy},{dz},{drx},{dry},{drz})"
         resp = self.send(cmd)
         self._assert_ok(resp, cmd)
         self.continue_queue()
+        try:
+            self.wait_until_idle()
+        except Exception as e:
+            print(f"[DOBOT] wait_until_idle failed after RelMovLUser: {e}")
         return resp
 
     def go_home(self, speed_percent: Optional[int] = None) -> str:
+        """
+        Move to SAFE_HOME_POSE at precision speed by default.
+        """
         if speed_percent is None:
             speed_percent = self.SPEED_PRECISION
         self.speed_factor(speed_percent)
