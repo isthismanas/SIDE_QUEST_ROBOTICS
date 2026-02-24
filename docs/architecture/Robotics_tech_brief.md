@@ -1,52 +1,93 @@
-Robotics Technical Brief (v6)
+Robotics Technical Brief (v7)
 
-Project: Side Quest: The Leaning Tower of Regolith (ARC 2026) Target
-Sub-Team: Robotics Last Updated: 23 Feb 2026 (Dev 8 – Autonomous 7-Block Loop Stabilized)
+Project: Side Quest: The Leaning Tower of Regolith (ARC 2026 Target)
+Sub-Team: Robotics
+Last Updated: 24 Feb 2026 (Dev 9 – Fault Recovery Stabilized; Drift Integration Next)
 
 ================================================================
 
-1.  Objective
+1. Objective
 
-Develop a modular, deterministic robotic control pipeline for a Dobot
-Magician E6 performing semi-autonomous lunar block stacking under a
-Hover–Commit supervisory control paradigm.
+Develop a modular, deterministic robotic control pipeline for a Dobot Magician E6 performing semi-autonomous lunar block stacking under a Hover–Commit supervisory control paradigm.
 
-The system must support: - Autonomous pick and approach - Hover pause
-for human evaluation - Human authorization to Drop or Fix - Limited
-teleoperation (NUDGE mode) - Autonomous continuation to next block -
-Combo-based speed boost mechanics - Controlled perceptual uncertainty
-via drift injection
+The system supports:
 
-Architecture separation: - Vision (pose estimation + drift) - Control
-(state machine + sequencing) - Motion (robot + gripper execution) - XR
-(UI + visualization only)
+Autonomous pick and approach
+
+Hover pause for human evaluation
+
+Human authorization to DROP or FIX
+
+Limited teleoperation (NUDGE mode)
+
+Autonomous continuation to next block
+
+Combo-based speed boost mechanics
+
+Deterministic retreat geometry
+
+Automatic fault detection and recovery
+
+Controlled perceptual uncertainty via drift injection (Dev 10)
+
+Architecture separation:
+
+Vision (pose estimation + drift injection layer)
+
+Control (state machine + sequencing)
+
+Motion (robot + gripper execution)
+
+XR (UI + visualization only)
 
 Unity never controls raw robot motion.
 
 ================================================================
 
-2.  System Architecture Overview
+2. System Architecture Overview
+Hardware Stack
 
-Hardware Stack: - Robot: Dobot Magician E6 (TCP/IP – Port 29999) -
-Gripper: DH Robotics PGE Series (RS485 Modbus RTU) - Control Node:
-Raspberry Pi 5 - Vision: 2× OAK-D Pro PoE - XR Interface: Unity (Meta
-Quest 3 via Link)
+Robot: Dobot Magician E6 (TCP/IP – Port 29999)
 
-Network Segmentation:
+Gripper: DH Robotics PGE Series (RS485 Modbus RTU)
 
-Robot Subnet (192.168.5.x) - Robot: 192.168.5.1 - Pi Alias: 192.168.5.10
+Control Node: Raspberry Pi 5
 
-XR / Vision Subnet (169.254.1.x) - Pi Primary: 169.254.1.10 - Laptop:
-169.254.1.5
+Vision: 2× OAK-D Pro PoE
 
-Unity sends high-level intent via TCP (Port 8088). Video streams on
-Ports 8085 / 8086. Pi executes all motion primitives.
+XR Interface: Unity (Meta Quest 3 via Link)
+
+Network Segmentation
+
+Robot Subnet (192.168.5.x)
+
+Robot: 192.168.5.1
+
+Pi Alias: 192.168.5.10
+
+XR / Vision Subnet (169.254.1.x)
+
+Pi Primary: 169.254.1.10
+
+Laptop: 169.254.1.5
+
+Ports:
+
+8088 – Unity supervisory control
+
+8089 – Admin recovery port (localhost only)
+
+8085 – Inspector video stream
+
+8086 – Site Manager video stream
+
+Unity sends high-level intent only.
+Pi executes all motion primitives.
 
 ================================================================
 
-3.  Control Architecture (Task Controller)
-
-Current Implemented States (Dev 8):
+3. Control Architecture (Task Controller)
+Implemented States (Dev 9)
 
 IDLE
 MOVING_TO_PICK
@@ -55,167 +96,293 @@ WAITING_FOR_DECISION
 PLACING
 FAULT
 
-The stacking state machine is now fully implemented for deterministic 7-block execution.
+Core Loop (Deterministic – Dev 8 Stable)
 
-Core Loop (Dev 8 Stable):
+START →
+Pick sequence (MovJ hover → MovL descend → grip → MovL retract → MovJ exit) →
+Move to tower hover →
+WAITING_FOR_DECISION →
+DROP → complete_place_sequence() →
+Auto-continue →
+Repeat until 7 blocks complete
 
-START → Pick sequence (MovJ hover → MovL descend → grip → MovL retract → MovJ exit)
+Auto-continue logic is internal to task_controller.py and does not require Unity to re-trigger START.
 
-Move to tower hover (MovJ)
+Fault Handling (Dev 9)
 
-WAITING_FOR_DECISION
+RobotMode polling continuously monitors for 9 / 11.
 
-DROP → complete_place_sequence()
+On detection:
 
-Auto-continue to next block
+STATE → FAULT
 
-Repeat until tower complete (7 blocks)
+Motion blocked
 
-Auto-continue logic is internal to task_controller and does not require Unity re-triggering START.
+START/DROP gated
+
+Only allowed exits: AUTO_RECOVER, HOME, CLEAR_FAULT
+
+AUTO_RECOVER performs:
+
+ClearError()
+
+EnableRobot()
+
+Safe home move
+
+Gripper open
+
+STATE reset to IDLE (on success)
+
+No Dobot Studio required for routine alarm clearing.
+
+State transitions are gated BEFORE motion execution to prevent inconsistent state advancement.
 
 ================================================================
 
-4.  Motion Driver Layer
+4. Motion Driver Layer
 
-Handles: - ClearError() - EnableRobot() - SpeedFactor() - MovJ - MovL -
-RelMovLUser (nudges) - Safe Home pose - RS485 gripper control
+Handles:
 
-Robot is armed once per VR TCP session. robot_armed gate blocks motion
-when VR disconnects.
+ClearError()
 
-Motion side-effects are now isolated in actions.py.
+EnableRobot()
+
+SpeedFactor()
+
+MovJ
+
+MovL
+
+RelMovLUser (nudges)
+
+Safe Home pose
+
+RS485 gripper control
+
+Continue() hardened (non-fatal on failure)
+
+Robot is armed once per VR TCP session.
+
+robot_armed gate blocks motion when VR disconnects.
+
+Motion side-effects are isolated in actions.py.
 task_controller.py does not directly execute robot primitives.
 
 ================================================================
 
-4.1 Gripper Control Architecture (RS485 – Dev 7)
+4.1 Gripper Control Architecture (RS485 – Stable)
 
-Hardware: - DH Robotics PGE Series - USB–RS485 (FT232) - Interface:
-/dev/ttyUSB0
+Hardware:
 
-Protocol: - Modbus RTU - pymodbus - pyserial
+DH Robotics PGE Series
 
-Base DO pulse control has been fully removed.
+USB–RS485 (FT232)
 
-Validated Registers: 0x0200 – Initialization state 0x0201 – Grip command
+Interface: /dev/ttyUSB0
+
+Protocol:
+
+Modbus RTU
+
+pymodbus + pyserial
+
+Validated Registers:
+
+0x0200 – Initialization state
+
+0x0201 – Grip command
+
 0x0202 – Current position
 
-Verified Positions: Open = 900 Closed = 50
+Calibrated Positions:
 
-Actuation Model: Open → write position 900 Close → write position 50
+Open = 900
 
-Gripper is position-controlled, deterministic, and repeatable. No toggle
-behavior. No Continue() dependency.
+Close = 50
 
-Planned: Auto-initialization routine at Task Controller startup.
+Characteristics:
+
+Position-based deterministic control
+
+No toggle semantics
+
+No Continue() dependency
+
+Holds position without drift
 
 ================================================================
 
-4.2 Retreat Geometry & IK Constraints (Dev 8)
-
-During high-level stacking (levels 5–7), direct MovJ transitions from tower hover to neutral produced collisions and IK failures.
+4.2 Retreat Geometry & IK Constraints (Validated – Dev 8)
 
 Observed constraint:
 
-IK infeasible above ≈430 mm on tower vertical axis
-
-Tower hover at level 6 ≈420 mm
-
-Additional vertical clearance caused IK faults (RobotMode 9)
+IK infeasible above ≈430 mm tower vertical axis
 
 Final stabilized retreat strategy:
 
-MovL to tower hover (linear vertical retract)
+MovL vertical retract to tower hover
 
-For high stack levels (≥5), perform linear +Y sidestep to Y ≈ -10 mm
+For levels ≥5: linear +Y sidestep to Y ≈ -10 mm
 
-MovJ to NEUTRAL_3 (validated safe pose)
+MovJ to NEUTRAL_3 safe pose
 
-This ensures:
+Ensures:
 
-No diagonal joint sweep through tower envelope
+No diagonal sweep through tower envelope
 
-No IK overshoot above 430 mm limit
+No IK overshoot above ceiling
 
-Deterministic escape geometry at full height
+Deterministic escape at full height
 
-This geometry is now validated for 7-block autonomous stacking.
-
-
-5.  Placement Evaluation (Planned – Not Yet Active)
-
-delta = target_pose - measured_pose
-
-Verdicts: GREEN – tight tolerance YELLOW – moderate deviation RED –
-large deviation
-
-Computed on Pi. Displayed in Unity.
+Validated for full 7-block autonomous stacking.
 
 ================================================================
 
-6.  Combo Mode
+5. Drift Injection Architecture (Dev 10 – In Progress)
 
-If 3 consecutive GREEN placements: - Increase SpeedFactor by 10–20%
+Drift is injected at pose proposal stage:
 
-Applies only to travel states. Resets on YELLOW or RED.
+Detection → Base Transform → Drift Injection → Proposed Pose → Control Layer
+
+Properties:
+
+Z-axis excluded
+
+Bounded magnitude
+
+Deterministic per attempt (seedable)
+
+Configurable via robot_config.py
+
+Does not alter retreat geometry
+
+Does not bypass safety envelopes
+
+Drift modifies only proposed placement pose.
+Motion execution remains deterministic.
 
 ================================================================
 
-7.  Safety Architecture
+6. Vision Pose Integration (Upcoming Phase)
 
-LED states: Green – Enabled Yellow – Collision Red – Alarm
+Planned pipeline:
 
-Controller must: - Enforce Z floor - Enforce XY envelope - Enter FAULT
-on alarm - Allow SAFE_HOME anytime
+Aruco Detection → Pose Estimation → Target Comparison → Delta Computation → Verdict Classification
+
+Delta:
+
+delta = target_pose – measured_pose
+
+Verdicts:
+
+GREEN – tight tolerance
+YELLOW – moderate deviation
+RED – large deviation
+
+Computed on Pi.
+Rendered in Unity.
+
+Vision does not sequence motion.
 
 ================================================================
 
-8.  Current Development Status (Dev 7.5 – State Machine Extraction)
+7. Combo Mode
+
+If 3 consecutive GREEN placements:
+
+Increase SpeedFactor by 10–20%
+
+Applies only to travel states.
+Precision states (NUDGE, PLACING) remain capped.
+Resets on YELLOW or RED.
+
+================================================================
+
+8. Safety Architecture
+
+LED states:
+
+Green – Enabled
+
+Yellow – Collision
+
+Red – Alarm
+
+Controller enforces:
+
+Z floor
+
+XY envelope
+
+FAULT state on RobotMode 9 / 11
+
+Recovery-only exits from FAULT
+
+Disarm on Unity disconnect
+
+Motion gating before state transition
+
+Continue() failures no longer crash controller threads.
+
+================================================================
+
+9. Current Development Status (Dev 9 Complete)
 
 Completed:
-- State machine split out (state_machine.py)
-- Actions module (actions.py) driving internal progression events
-- Unity START button wired (sends START)
-- Blocking motion achieved via RobotMode() polling (not Sync())
-- Pick sequence now uses real Dobot Studio poses (L/R/T/Neutral)
-- Working behavior: START picks L4 and holds at T1 hover; DROP places.
-- Motion driver refactored (DO-based gripper removed)
-- State machine extracted into dedicated module
-- Action side-effects separated from orchestration
-- VR-session-based arming model stabilized
-- TCP command routing hardened against thread crashes
-- Unity disconnects can happen when headset removed / camera view switched → robot disarms (by design).
 
-Partially Implemented:
-- Minimal pick and drop primitives
-- NUDGE mode (XY only)
+Deterministic 7-block stacking
 
-Implemented (Dev 8):
-- Full autonomous 7-block stacking loop
-- Deterministic retreat logic with IK ceiling compliance
-- High-level sidestep escape maneuver
-- Fault detection via RobotMode (9 / 11)
-- Autonomous continuation without Unity re-trigger
+Stabilized retreat geometry
+
+State machine modularization
+
+Admin recovery port (8089)
+
+AUTO_RECOVER routine
+
+FAULT state enforcement
+
+Continue() hardened
+
+Graceful shutdown (no DepthAI abort)
+
+VR-session arming model stable
+
+Next Phase (Dev 10):
+
+Drift Engine integration
+
+Vision pose estimation integration
+
+Tolerance engine activation
+
+XR overlay of proposed vs measured pose
+
+Full-cycle Drift + Vision stress testing
 
 ================================================================
 
-9.  Roadmap
+10. Software Layer Separation
 
-Phase 1 – Deterministic Motion (Complete – Dev 8) Phase 2 – State Machine Integration Phase
-3 – Vision Pose Integration Phase 4 – Evaluation + Combo Phase 5 –
-Safety Hardening
+The robotics control stack is divided into:
 
-================================================================
+task_controller.py (TCP + orchestration)
 
-10. Software Layer Separation (Dev 7+)
+state_machine.py (transition rules + gating)
 
-The robotics control stack is now divided into:
+actions.py (robot + gripper side-effects)
 
-- task_controller.py (TCP + orchestration)
-- state_machine.py (transition rules and gating)
-- actions.py (robot + gripper side-effects)
-- dobot_driver.py (Dobot TCP driver)
-- dh_gripper.py (RS485 Modbus gripper driver)
-- robot_config.py (single source of truth)
+dobot_driver.py (Dobot TCP driver)
+
+dh_gripper.py (RS485 Modbus driver)
+
+robot_config.py (configuration + pose definitions)
+
+(Upcoming) drift_engine.py
+
+(Upcoming) vision_engine.py
 
 This separation reduces cross-module coupling and improves robustness for ARC deployment.
+
+================================================================

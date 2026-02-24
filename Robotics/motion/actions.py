@@ -26,6 +26,7 @@ from typing import Optional
 import robot_config as cfg
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE
+import drift_engine
 
 
 @dataclass
@@ -194,6 +195,23 @@ def recover_from_fault(handles: SystemHandles) -> bool:
     return True
 
 
+def safe_reset_after_tumble(handles: SystemHandles, holding_block: bool) -> None:
+    """
+    Safe reset flow used after a tower tumble.
+
+    1) If currently holding a block, move to SAFE_DUMP_POSE and release.
+    2) Move to SAFE_HOME_POSE.
+    3) Ensure gripper is open (idempotent).
+    """
+    if holding_block:
+        handles.robot.movj_pose(cfg.SAFE_DUMP_POSE)
+        handles.gripper.open()
+        time.sleep(0.2)
+
+    handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
+    handles.gripper.open()
+
+
 
 def do_home(handles: SystemHandles) -> None:
     """Go to safe home pose."""
@@ -311,7 +329,9 @@ def complete_place_sequence(handles: SystemHandles, stack_level: int) -> None:
     robot = handles.robot
     gripper = handles.gripper
 
-    place_pose = cfg.tower_place_pose(stack_level)
+    base_place_pose = cfg.tower_place_pose(stack_level)
+    place_pose = drift_engine.inject_drift(base_place_pose, stack_level)
+    print(f"[DRIFT] stack_level={stack_level} base={base_place_pose} drifted={place_pose}")
     hover_pose = cfg.tower_hover_pose(stack_level)
 
     # Linear vertical descent

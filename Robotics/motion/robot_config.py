@@ -76,6 +76,12 @@ RIGHT_PICK_STEP_MM = 36.6                  # height step per level (right stack)
 # Tower position (destination) - measured/calibrated
 TOWER_BASE_POSE = (193.4597, -91.4552, 157.8142, 180.0, 0.0, -124.0)
 
+# Safe dump pose (used when tower tumbles)
+SAFE_DUMP_POSE = (197.4741, 49.1437, 156.6749, 180.0, 0.0, -124.0)
+
+# Session logging
+LOG_DIR = "logs"
+
 # ----------------------------
 # Gripper (Dev 7+) — RS485 Modbus RTU
 # ----------------------------
@@ -132,3 +138,29 @@ def tower_hover_pose(level: int):
     """
     x, y, z0, rx, ry, rz = TOWER_BASE_POSE
     return (x, y, z0 + level * BLOCK_HEIGHT_MM + PLACE_CLEARANCE_MM, rx, ry, rz)
+
+
+# ----------------------------
+# Drift Engine (Dev 10)
+# ----------------------------
+
+# Master toggle
+DRIFT_ENABLED = True
+
+# Deterministic run seed (change only when you want a new reproducible pattern)
+DRIFT_RUN_SEED = 12345
+
+# Baseline max XY drift in mm at 1x scale
+DRIFT_MAX_XY_MM = 5.0
+
+# Experimental scale multiplier (only knob you change during experiments)
+# 0.0 = no drift
+# 1.0 = baseline
+# 2.0 = double drift
+DRIFT_SCALE = 1.35
+
+# Distribution mode
+# "uniform" = random within square bounds
+# "grid"    = deterministic grid offsets
+# "fixed"   = always same offset direction
+DRIFT_MODE = "uniform"

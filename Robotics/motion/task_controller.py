@@ -1,4 +1,4 @@
-import time, socket, struct, os, threading
+import time, socket, struct, os, threading, json, uuid
 import depthai as dai
 from datetime import timedelta
 import hashlib
@@ -54,6 +54,42 @@ robot_armed = False
 
 # --- Graceful shutdown ---
 STOP_EVENT = threading.Event()
+
+# --- Session-level participant + telemetry state ---
+participant_name = None
+session_id = None
+tower_attempt_start_ts = None
+block_attempt_start_ts = None
+holding_block = False
+
+
+def log_event(event: str, **fields) -> None:
+    """Append one JSONL event record to cfg.LOG_DIR."""
+    try:
+        log_dir = getattr(cfg, "LOG_DIR", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        sid = session_id or "no_session"
+        log_path = os.path.join(log_dir, f"session_{sid}.jsonl")
+
+        record = {
+            "timestamp": time.time(),
+            "event": event,
+            "session_id": session_id,
+            "participant_name": participant_name,
+            "state": STATE.name if hasattr(STATE, "name") else str(STATE),
+            "current_stack_level": globals().get("current_stack_level", None),
+            "current_pick_index": globals().get("current_pick_index", None),
+        }
+        if hasattr(cfg, "DRIFT_SCALE"):
+            record["drift_scale"] = cfg.DRIFT_SCALE
+        if fields:
+            record.update(fields)
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[LOG] Failed to write event {event}: {e}")
 
 
 # --- SIGNIFIER: prove which file is running ---
@@ -180,12 +216,67 @@ def handle_command(cmd_str: str, source: str) -> None:
     """
     global STATE, robot_armed, gripper_connected, controller_busy
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
+    global participant_name, session_id, tower_attempt_start_ts, block_attempt_start_ts, holding_block
 
     # Normalize command
     if cmd_str == "COMMIT":
         cmd_str = "DROP"
 
     print(f"\n[{source}] Received: {cmd_str}   (STATE={STATE.name})  (ARMED={robot_armed})  (GRIPPER={gripper_connected})")
+
+    # Raw session commands (before parse_event)
+    upper_cmd = cmd_str.upper()
+    if upper_cmd == "NAME" or upper_cmd.startswith("NAME "):
+        # Accept: NAME <free text>
+        name_value = cmd_str[4:].strip()
+        if not name_value:
+            print("[GATE] NAME command requires free text (e.g., NAME Alice).")
+            return
+        participant_name = name_value
+        session_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        tower_attempt_start_ts = None
+        block_attempt_start_ts = None
+        log_event("EVENT_NAME_SET", participant=participant_name, source=source)
+        print(f"[FACILITATOR] Participant set: {participant_name}. You may START.")
+        return
+
+    if upper_cmd == "TUMBLE":
+        # Run summary before any state/session reset
+        blocks_placed = current_stack_level
+        now_mono = time.monotonic()
+        run_time_s = None
+        if tower_attempt_start_ts is not None:
+            run_time_s = now_mono - tower_attempt_start_ts
+
+        name_for_summary = participant_name if participant_name else "Unknown participant"
+        if run_time_s is not None:
+            print(f"{name_for_summary} successfully placed {blocks_placed} blocks in {run_time_s:.1f} seconds")
+        else:
+            print(f"{name_for_summary} successfully placed {blocks_placed} blocks (time unavailable)")
+
+        log_event(
+            "EVENT_RUN_SUMMARY",
+            participant=participant_name,
+            blocks_placed=blocks_placed,
+            run_time_s=run_time_s,
+            source=source,
+        )
+
+        log_event("EVENT_TUMBLE", source=source, holding_block=holding_block)
+        try:
+            actions.safe_reset_after_tumble(handles, holding_block)
+        except Exception as e:
+            print(f"[{source}] TUMBLE reset failed: {e}")
+            log_event("EVENT_TUMBLE_RESET_ERROR", source=source, error=str(e))
+
+        STATE = State.IDLE
+        current_pick_index = 0
+        current_stack_level = 0
+        holding_block = False
+        participant_name = None
+        tower_attempt_start_ts = None
+        block_attempt_start_ts = None
+        return
 
     # SAFE_RESET short-circuit (before parsing)
     if cmd_str == "SAFE_RESET":
@@ -205,6 +296,12 @@ def handle_command(cmd_str: str, source: str) -> None:
         event, payload = parse_event(cmd_str)
     except ValueError as e:
         print(f"[CMD] Reject: {e}")
+        return
+
+    # Session participant gate
+    if (participant_name is None or participant_name.strip() == "") and event in {Event.START_STACK, Event.DROP, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW}:
+        print(f"[GATE] Participant name required. Rejecting: {cmd_str}")
+        log_event("EVENT_REJECT_NO_NAME", cmd=cmd_str, source=source)
         return
 
     # Gate transition using state machine
@@ -282,6 +379,10 @@ def handle_command(cmd_str: str, source: str) -> None:
                 print("[STACK] Tower full. Ignoring START.")
                 return
 
+            # Run start timing (monotonic) when a new run actually begins
+            if current_stack_level == 0 and tower_attempt_start_ts is None:
+                tower_attempt_start_ts = time.monotonic()
+
             # Execute pick sequence
             side, level = cfg.PICK_SEQUENCE[current_pick_index]
             actions.execute_pick_sequence(handles, side, level)
@@ -318,6 +419,8 @@ def handle_command(cmd_str: str, source: str) -> None:
                     if result3.allowed:
                         STATE = result3.next_state
                         print(f"[SM] -> {STATE.name} (AT_TOWER_HOVER)")
+                        if STATE == State.WAITING_FOR_DECISION:
+                            block_attempt_start_ts = time.time()
         finally:
             controller_busy = False
 
@@ -364,6 +467,12 @@ def handle_command(cmd_str: str, source: str) -> None:
             controller_busy = False
 
     elif event == Event.DROP:
+        decision_time = None
+        if block_attempt_start_ts is not None:
+            decision_time = time.time() - block_attempt_start_ts
+        log_event("EVENT_DROP_RECEIVED", source=source, decision_time=decision_time)
+        block_attempt_start_ts = None
+
         if controller_busy:
             print("[GATE] Controller busy.")
             return
@@ -381,6 +490,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         STATE = fault_result.next_state
                         print(f"[SM] -> {STATE.name} (FAULT)")
                     return
+                holding_block = False
             except Exception as e:
                 print(f"[STACK] Place failed: {e}")
                 # Emit fault event
@@ -434,6 +544,8 @@ def handle_command(cmd_str: str, source: str) -> None:
                                 result3 = step(STATE, Event.AT_TOWER_HOVER)
                                 if result3.allowed:
                                     STATE = result3.next_state
+                                    if STATE == State.WAITING_FOR_DECISION:
+                                        block_attempt_start_ts = time.time()
                 else:
                     print("[STACK] Target reached or no more blocks.")
         finally:
@@ -472,9 +584,11 @@ def handle_command(cmd_str: str, source: str) -> None:
 
     elif event == Event.GRIP_OPEN:
         actions.do_grip_open(handles)
+        holding_block = False
 
     elif event == Event.GRIP_CLOSE:
         actions.do_grip_close(handles)
+        holding_block = True
 
     elif event == Event.GRIP_TOGGLE:
         actions.do_grip_toggle(handles)
@@ -627,12 +741,59 @@ def admin_server():
             print(f"[ADMIN] Server error: {e}")
 
 
+def facilitator_hotkey_loop():
+    """
+    Facilitator keyboard hotkeys from stdin.
+    Runs in a daemon thread and dispatches commands via handle_command(..., "FACILITATOR").
+    """
+    print("[FACILITATOR] Console ready: t|tumble, r|recover, n <name>|name <name>, h|help")
+    while not STOP_EVENT.is_set():
+        try:
+            line = input("FACILITATOR> ").strip()
+            if not line:
+                continue
+
+            lowered = line.lower()
+            if lowered in {"h", "help"}:
+                print("[FACILITATOR] Commands:")
+                print("  t | tumble           -> TUMBLE")
+                print("  r | recover          -> AUTO_RECOVER")
+                print("  n <name>             -> NAME <name>")
+                print("  name <name>          -> NAME <name>")
+                print("  h | help             -> this help")
+                continue
+
+            if lowered in {"t", "tumble"}:
+                cmd = "TUMBLE"
+            elif lowered in {"r", "recover"}:
+                cmd = "AUTO_RECOVER"
+            elif lowered.startswith("n ") or lowered.startswith("name "):
+                name = line.split(" ", 1)[1].strip()
+                if not name:
+                    print("[FACILITATOR] Usage: n <name>  (or: name <name>)")
+                    continue
+                cmd = f"NAME {name}"
+            else:
+                print(f"[FACILITATOR] Unknown command: {line} (type 'h' or 'help')")
+                continue
+
+            try:
+                handle_command(cmd, "FACILITATOR")
+            except Exception as e:
+                print(f"[FACILITATOR] Command error: {e}")
+        except EOFError:
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[FACILITATOR] Input loop error: {e}")
+
+
 # --- 5. START SYSTEM ---
 threading.Thread(target=command_server, daemon=True).start()
 threading.Thread(target=admin_server, daemon=True).start()
 threading.Thread(target=camera_server, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"), daemon=True).start()
 time.sleep(10)
 threading.Thread(target=camera_server, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"), daemon=True).start()
+threading.Thread(target=facilitator_hotkey_loop, daemon=True).start()
 
 print("TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
 try:
