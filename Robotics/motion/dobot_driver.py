@@ -176,9 +176,19 @@ class DobotDriver:
     # Queue execution control
     # ----------------------------
     def continue_queue(self) -> str:
+        """
+        Send Continue() to the robot.
+        Never raises RuntimeError. Prints warnings for empty or non-0 responses.
+        Returns resp for higher layer handling.
+        """
         cmd = "Continue()"
         resp = self.send(cmd)
-        self._assert_ok(resp, cmd)
+        if resp is None or resp == "":
+            print(f"[DOBOT] Warning: No response for {cmd}")
+            return resp
+        if not resp.strip().startswith("0,"):
+            print(f"[DOBOT] Warning: Continue() returned non-0 response: {resp}")
+            return resp
         return resp
 
     def robot_mode(self) -> int:

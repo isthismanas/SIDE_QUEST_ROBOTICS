@@ -71,8 +71,129 @@ def initialize_stack_session(handles: SystemHandles) -> None:
 
 
 # ----------------------------
-# Robot motion actions
+# Fault recovery
 # ----------------------------
+
+def recover_from_fault(handles: SystemHandles) -> bool:
+    """
+    Best-effort recovery from a faulted state.
+    
+    Steps:
+    1. Query initial robot mode
+    2. If already in fault mode (9, 11), skip motion and return
+    3. Clear any error state
+    4. Re-enable the robot
+    5. Set safe speed factor
+    6. Move to safe home pose (joint motion)
+    7. Open gripper (gracefully skip if not connected)
+    8. Query final robot mode
+    
+    This is designed to be called after a FAULT event to attempt safe recovery.
+    Exceptions are caught and logged; fails gracefully rather than re-raising.
+    """
+    # Local helper to query robot mode safely
+    def _mode():
+        try:
+            m = handles.robot.robot_mode()
+            return None if m == -1 else m
+        except Exception:
+            return None
+
+    print("[RECOVERY] recover_from_fault: start")
+
+    # Query initial mode (for logging)
+    mode_before = _mode()
+    print(f"[RECOVERY] mode_before={mode_before}")
+
+    # If robot is not in fault, run lightweight re-center and return OK
+    if mode_before is not None and mode_before not in (9, 11):
+        try:
+            handles.robot.speed_factor(cfg.SPEED_PRECISION)
+            print(f"[RECOVERY] speed_factor={cfg.SPEED_PRECISION}")
+        except Exception as e:
+            print(f"[RECOVERY] speed_factor failed: {e}")
+        try:
+            handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
+            handles.robot.wait_until_idle()
+            print("[RECOVERY] moved to SAFE_HOME_POSE")
+        except Exception as e:
+            print(f"[RECOVERY] movj failed: {e}")
+            return False
+        try:
+            handles.gripper.open()
+            print("[RECOVERY] gripper opened")
+        except Exception as e:
+            print(f"[RECOVERY] gripper open failed: {e}")
+        print("[RECOVERY] recover_from_fault: complete (idempotent)")
+        return True
+
+    # Otherwise, proceed with full recovery
+    try:
+        resp = handles.robot.clear_error()
+        print(f"[RECOVERY] clear_error -> {resp}")
+    except Exception as e:
+        print(f"[RECOVERY] clear_error failed: {e}")
+
+    try:
+        resp = handles.robot.enable()
+        print(f"[RECOVERY] enable -> {resp}")
+    except Exception as e:
+        print(f"[RECOVERY] enable failed: {e}")
+
+    # Poll RobotMode up to 3s after ClearError + EnableRobot.
+    # Fail only on hard fault (9/11). Any other valid mode (>=0) is recoverable.
+    start_t = time.time()
+    timeout = 3.0
+    mode_after = None
+    while time.time() - start_t < timeout:
+        m = _mode()
+        if m is None:
+            time.sleep(0.25)
+            continue
+        if m in (9, 11):
+            print(f"[RECOVERY] mode_before={mode_before}")
+            print(f"[RECOVERY] mode_after={m}")
+            print("[RECOVERY] HARD FAULT detected during poll. Aborting.")
+            return False
+        if m >= 0:
+            mode_after = m
+            break
+        time.sleep(0.25)
+
+    if mode_after is None:
+        print(f"[RECOVERY] mode_before={mode_before}")
+        print(f"[RECOVERY] mode_after={mode_after}")
+        print("[RECOVERY] No valid RobotMode within timeout. Aborting.")
+        return False
+
+    print(f"[RECOVERY] mode_before={mode_before}")
+    print(f"[RECOVERY] mode_after={mode_after}")
+
+    # Proceed with recovery motions
+    try:
+        handles.robot.speed_factor(cfg.SPEED_PRECISION)
+        print(f"[RECOVERY] speed_factor={cfg.SPEED_PRECISION}")
+    except Exception as e:
+        print(f"[RECOVERY] speed_factor failed: {e}")
+
+    try:
+        handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
+        handles.robot.wait_until_idle()
+        print("[RECOVERY] moved to SAFE_HOME_POSE")
+    except Exception as e:
+        print(f"[RECOVERY] movj failed: {e}")
+        return False
+
+    try:
+        handles.gripper.open()
+        print("[RECOVERY] gripper opened")
+    except Exception as e:
+        print(f"[RECOVERY] gripper open failed: {e}")
+
+    print("[RECOVERY] recover_from_fault: complete")
+    return True
+
+
 
 def do_home(handles: SystemHandles) -> None:
     """Go to safe home pose."""
