@@ -5,13 +5,41 @@ Central configuration for Side Quest robot + gripper control.
 Keep ALL magic numbers here:
 - network/IP/ports
 - speed profiles
-- canonical poses
-- nudge step sizes
-- gripper RS485 parameters (Dev 7+)
-
-Units:
 - Poses: mm and degrees (Dobot dashboard convention)
 """
+
+# ----------------------------
+# Logging Configuration
+# ----------------------------
+# Run mode
+# Allowed: "COMP", "DEBUG"
+RUN_MODE = "COMP"
+
+# LOG_LEVEL sets the default logging level for all modules.
+# LOG_MODULES defines per-module overrides; module-level values supersede LOG_LEVEL.
+# Allowed levels: "DEBUG", "INFO", "WARN", "ERROR", "QUIET"
+LOG_LEVEL = "INFO"
+LOG_MODULES = {
+    "DOBOT": "WARN",
+    "CAM": "WARN",
+    "CONTROL": "INFO",
+    "ADMIN": "INFO",
+    "STACK": "WARN",
+    "DRIFT": "WARN"
+}
+
+if RUN_MODE == "COMP":
+    LOG_LEVEL = "WARN"
+    LOG_MODULES = {
+        "DOBOT": "WARN",
+        "STACK": "WARN",
+        "DRIFT": "WARN",
+        "CAM": "WARN",
+        "CONTROL": "INFO",
+        "ADMIN": "INFO"
+    }
+elif RUN_MODE == "DEBUG":
+    LOG_LEVEL = "DEBUG"
 
 # ----------------------------
 # Network / Dobot Dashboard

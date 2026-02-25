@@ -27,6 +27,10 @@ import robot_config as cfg
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE
 import drift_engine
+from logger import info, debug
+
+
+cfg_pose_type = tuple[float, float, float, float, float, float]
 
 
 @dataclass
@@ -277,8 +281,8 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
         pick_pose[5],
     )
 
-    print(f"[STACK] pick target side={side} level={level} pick_pose={pick_pose}")
-    print(f"[STACK] pick hover_pose={hover_pose}")
+    info("STACK", f"pick target side={side} level={level} pick_pose={pick_pose}")
+    debug("STACK", f"pick hover_pose={hover_pose}")
 
     # Joint transition into region
     robot.movj_pose(hover_pose)
@@ -311,11 +315,11 @@ def move_to_tower_hover(handles: SystemHandles, stack_level: int) -> None:
     """
     robot = handles.robot
     hover_pose = cfg.tower_hover_pose(stack_level)
-    print(f"[STACK] tower hover level={stack_level} hover_pose={hover_pose}")
+    info("STACK", f"tower hover level={stack_level} hover_pose={hover_pose}")
     robot.movj_pose(hover_pose)
 
 
-def complete_place_sequence(handles: SystemHandles, stack_level: int) -> None:
+def complete_place_sequence(handles: SystemHandles, stack_level: int, place_pose: Optional[cfg_pose_type] = None) -> None:
     """
     Deterministic placement completion with hybrid strategy.
     - MovL vertical descent to place position
@@ -329,10 +333,20 @@ def complete_place_sequence(handles: SystemHandles, stack_level: int) -> None:
     robot = handles.robot
     gripper = handles.gripper
 
-    base_place_pose = cfg.tower_place_pose(stack_level)
-    place_pose = drift_engine.inject_drift(base_place_pose, stack_level)
-    print(f"[DRIFT] stack_level={stack_level} base={base_place_pose} drifted={place_pose}")
-    hover_pose = cfg.tower_hover_pose(stack_level)
+    if place_pose is None:
+        base_place_pose = cfg.tower_place_pose(stack_level)
+        place_pose = drift_engine.inject_drift(base_place_pose, stack_level)
+        info("DRIFT", f"stack_level={stack_level} base={base_place_pose} drifted={place_pose}")
+    else:
+        debug("DRIFT", f"using proposed pose stack_level={stack_level} pose={place_pose}")
+    retract_hover_pose = (
+        place_pose[0],
+        place_pose[1],
+        place_pose[2] + cfg.PLACE_CLEARANCE_MM,
+        place_pose[3],
+        place_pose[4],
+        place_pose[5],
+    )
 
     # Linear vertical descent
     robot.movl_pose(place_pose)
@@ -341,19 +355,19 @@ def complete_place_sequence(handles: SystemHandles, stack_level: int) -> None:
     time.sleep(0.3)
 
     # Linear vertical retract
-    robot.movl_pose(hover_pose)
+    robot.movl_pose(retract_hover_pose)
     # Ensure retract finished before joint exit
     robot.wait_until_idle()
 
     # Optional sidestep for very high stacks to reduce joint travel over tower
     if stack_level >= 5:
         sidestep_pose = (
-            hover_pose[0],
+            retract_hover_pose[0],
             -10.0,
-            hover_pose[2],
-            hover_pose[3],
-            hover_pose[4],
-            hover_pose[5],
+            retract_hover_pose[2],
+            retract_hover_pose[3],
+            retract_hover_pose[4],
+            retract_hover_pose[5],
         )
         robot.movl_pose(sidestep_pose)
         robot.wait_until_idle()
