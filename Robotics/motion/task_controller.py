@@ -9,6 +9,7 @@ from state_machine import State, Event, step, parse_event
 import actions
 from actions import SystemHandles
 import drift_engine
+import tolerance_engine
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE  # NEW: RS485 Modbus gripper driver
 import robot_config as cfg
@@ -75,6 +76,10 @@ holding_block = False
 current_session_token = uuid4()
 proposed_place_pose = None
 proposed_place_stack_level = None
+current_zone = "GREEN"
+current_zone_stack_level = None
+_unity_command_conn = None
+_last_sent_zone = None
 
 
 def _track_server_socket(sock: socket.socket) -> None:
@@ -232,7 +237,7 @@ def camera_server(mxid, port, label):
     server = None
     try:
         with dai.Device(pipeline, dai.DeviceInfo(mxid)) as device:
-            if getattr(cfg, "RUN_MODE", "DEBUG") == "COMP":
+            if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
                 try:
                     device.setLogLevel(dai.LogLevel.CRITICAL)
                 except Exception:
@@ -312,9 +317,23 @@ def _module_for_source(source: str) -> str:
     return "ADMIN" if source == "ADMIN" else "CONTROL"
 
 
+def _push_zone_if_needed(force: bool = False) -> None:
+    global _last_sent_zone
+    if _unity_command_conn is None:
+        return
+    if not force and _last_sent_zone == current_zone:
+        return
+    try:
+        _unity_command_conn.sendall(f"ZONE {current_zone}\n".encode("utf-8"))
+        _last_sent_zone = current_zone
+    except Exception:
+        pass
+
+
 def _handle_post_tower_hover(module: str, my_token) -> bool:
     """Handle post-hover fault check and AT_TOWER_HOVER transition in one place."""
     global STATE, block_attempt_start_ts, proposed_place_pose, proposed_place_stack_level
+    global current_zone, current_zone_stack_level
 
     m = handles.robot.robot_mode()
     if m in (9, 11):
@@ -338,9 +357,15 @@ def _handle_post_tower_hover(module: str, my_token) -> bool:
                 base_place = cfg.tower_place_pose(current_stack_level)
                 proposed_place_pose = drift_engine.inject_drift(base_place, current_stack_level)
                 proposed_place_stack_level = current_stack_level
+                current_zone = tolerance_engine.classify_pose(proposed_place_pose)
+                current_zone_stack_level = current_stack_level
+                _push_zone_if_needed(force=True)
             else:
                 proposed_place_pose = None
                 proposed_place_stack_level = None
+                current_zone = "GREEN"
+                current_zone_stack_level = None
+                _push_zone_if_needed(force=True)
             if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
                 info("CONTROL", f"READY: waiting for DROP/FIX (stack_level={current_stack_level})")
             block_attempt_start_ts = time.time()
@@ -366,6 +391,7 @@ def handle_command(cmd_str: str, source: str) -> None:
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
     global participant_name, session_id, tower_attempt_start_ts, block_attempt_start_ts, holding_block, current_session_token
     global proposed_place_pose, proposed_place_stack_level
+    global current_zone, current_zone_stack_level
 
     # Normalize command
     if cmd_str == "COMMIT":
@@ -394,6 +420,8 @@ def handle_command(cmd_str: str, source: str) -> None:
         current_session_token = uuid4()
         proposed_place_pose = None
         proposed_place_stack_level = None
+        current_zone = "GREEN"
+        current_zone_stack_level = None
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
         info("CONTROL", f"Participant set: {participant_name}. Ready to START.")
         return
@@ -439,6 +467,8 @@ def handle_command(cmd_str: str, source: str) -> None:
         block_attempt_start_ts = None
         proposed_place_pose = None
         proposed_place_stack_level = None
+        current_zone = "GREEN"
+        current_zone_stack_level = None
         if getattr(cfg, "RUN_MODE", "DEBUG") == "COMP" and vr_connected:
             print("Waiting for participant name...")
         return
@@ -454,6 +484,8 @@ def handle_command(cmd_str: str, source: str) -> None:
             current_stack_level = 0
             proposed_place_pose = None
             proposed_place_stack_level = None
+            current_zone = "GREEN"
+            current_zone_stack_level = None
         except Exception as e:
             warn(module, f"[{source}] SAFE_RESET failed: {e}")
         return
@@ -601,6 +633,9 @@ def handle_command(cmd_str: str, source: str) -> None:
                     proposed_place_pose[4],
                     proposed_place_pose[5],
                 )
+                current_zone = tolerance_engine.classify_pose(proposed_place_pose)
+                current_zone_stack_level = current_stack_level
+                _push_zone_if_needed(force=False)
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
             if m in (9, 11):
@@ -629,6 +664,9 @@ def handle_command(cmd_str: str, source: str) -> None:
                     proposed_place_pose[4],
                     proposed_place_pose[5] + payload["dtheta"],
                 )
+                current_zone = tolerance_engine.classify_pose(proposed_place_pose)
+                current_zone_stack_level = current_stack_level
+                _push_zone_if_needed(force=False)
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
             if m in (9, 11):
@@ -669,13 +707,19 @@ def handle_command(cmd_str: str, source: str) -> None:
                         STATE = fault_result.next_state
                         info(module, f"[SM] -> {STATE.name} (FAULT)")
                     return
+                if current_zone_stack_level == current_stack_level and current_zone == "RED":
+                    cfg.DRIFT_SCALE = min(3.0, float(cfg.DRIFT_SCALE) + float(cfg.DRIFT_RISK_INCREMENT))
                 holding_block = False
                 proposed_place_pose = None
                 proposed_place_stack_level = None
+                current_zone = "GREEN"
+                current_zone_stack_level = None
             except Exception as e:
                 warn(module, f"[STACK] Place failed: {e}")
                 proposed_place_pose = None
                 proposed_place_stack_level = None
+                current_zone = "GREEN"
+                current_zone_stack_level = None
                 # Emit fault event
                 fault_result = step(STATE, Event.FAULT)
                 if fault_result.allowed:
@@ -750,6 +794,8 @@ def handle_command(cmd_str: str, source: str) -> None:
                 current_stack_level = 0
                 proposed_place_pose = None
                 proposed_place_stack_level = None
+                current_zone = "GREEN"
+                current_zone_stack_level = None
                 robot_armed = True
             else:
                 warn(module, "[RECOVERY] Recovery reported FAILURE. Setting state to FAULT.")
@@ -777,7 +823,8 @@ def handle_command(cmd_str: str, source: str) -> None:
 # --- 4. HIGHWAY 2: COMMAND HUB (Logic Bridge) ---
 def command_server():
     global STATE, robot_armed, gripper_connected, controller_busy, vr_connected
-    global proposed_place_pose, proposed_place_stack_level
+    global proposed_place_pose, proposed_place_stack_level, current_zone, current_zone_stack_level
+    global _unity_command_conn, _last_sent_zone
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -803,6 +850,8 @@ def command_server():
                     break
                 raise
             _track_client_socket(conn)
+            _unity_command_conn = conn
+            _last_sent_zone = None
             vr_connected = True
             info("CONTROL", f"[CONTROL] VR Connected: {addr}")
 
@@ -821,7 +870,7 @@ def command_server():
             try:
                 actions.arm_robot_once(handles)
                 robot_armed = True
-                if getattr(cfg, "RUN_MODE", "DEBUG") == "COMP":
+                if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
                     print("Waiting for participant name...")
             except Exception as e:
                 robot_armed = False
@@ -870,6 +919,8 @@ def command_server():
             finally:
                 _close_socket_quietly(conn)
                 _untrack_client_socket(conn)
+                if _unity_command_conn is conn:
+                    _unity_command_conn = None
 
             # NOTE: handles.gripper.close() not called here because close() is used for
             # gripper actuation (closing the grip) and would cause unintended physical motion.
@@ -887,6 +938,8 @@ def command_server():
                 vr_connected = False
                 proposed_place_pose = None
                 proposed_place_stack_level = None
+                current_zone = "GREEN"
+                current_zone_stack_level = None
     finally:
         _close_socket_quietly(server)
         _untrack_server_socket(server)
@@ -1026,7 +1079,7 @@ _start_worker_thread("admin-server", admin_server)
 _start_worker_thread("camera-inspector", camera_server, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
 time.sleep(10)
 _start_worker_thread("camera-site-manager", camera_server, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
-if getattr(cfg, "RUN_MODE", "DEBUG") == "COMP":
+if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
     print("Start Unity and press Play...")
 _start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)
 
@@ -1051,6 +1104,6 @@ except KeyboardInterrupt:
         sys.exit(1)
 
     info("CONTROL", "[MAIN] Shutdown complete.")
-    if getattr(cfg, "RUN_MODE", "DEBUG") == "COMP":
+    if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
         os._exit(0)
     sys.exit(0)

@@ -169,6 +169,17 @@ def tower_hover_pose(level: int):
 
 
 # ----------------------------
+# Tolerance Engine (Robot-only, Dev 12)
+# ----------------------------
+TOLERANCE_GREEN_MM = 3.0
+TOLERANCE_YELLOW_MM = 6.0
+TOLERANCE_SCALE = 1.0
+
+# Risk escalation: if placement zone is RED, increase drift for next block
+DRIFT_RISK_INCREMENT = 0.15
+
+
+# ----------------------------
 # Drift Engine (Dev 10)
 # ----------------------------
 
