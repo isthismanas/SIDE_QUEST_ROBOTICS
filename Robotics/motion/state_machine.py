@@ -59,6 +59,7 @@ class Event(Enum):
     # Optional future hooks
     FAULT = auto()
     CLEAR_FAULT = auto()
+    AUTO_RECOVER = auto()
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,8 @@ _TRANSITIONS: Dict[Tuple[State, Event], State] = {
     (State.MOVING_TO_PICK, Event.FAULT): State.FAULT,
     (State.MOVING_TO_TOWER_HOVER, Event.FAULT): State.FAULT,
     (State.FAULT, Event.CLEAR_FAULT): State.IDLE,
+    (State.FAULT, Event.AUTO_RECOVER): State.IDLE,
+    (State.FAULT, Event.HOME): State.IDLE,
 }
 
 # Events that are *state-invariant* (allowed; state doesn't change here)
@@ -116,6 +119,7 @@ _ALWAYS_ALLOWED = {
     Event.GRIP_TOGGLE,
     Event.CONNECT,
     Event.DISCONNECT,
+    Event.AUTO_RECOVER,
 }
 
 # Events that are only meaningful in certain states but don't necessarily change state
@@ -130,19 +134,32 @@ def step(state: State, event: Event) -> TransitionResult:
     """
     Returns whether 'event' is allowed in 'state', and what the next state should be.
     If allowed and no explicit transition exists, next_state==state.
+    
+    Explicit transitions take priority, allowing overrides like AUTO_RECOVER from FAULT.
     """
-    if event in _ALWAYS_ALLOWED:
-        return TransitionResult(True, state)
+    # Check explicit state transitions first (highest priority)
+    key = (state, event)
+    if key in _TRANSITIONS:
+        return TransitionResult(True, _TRANSITIONS[key])
 
+    # Check state-gated events (allowed only in specific states)
     if event in _STATE_GATED_ONLY:
         allowed_states = _STATE_GATED_ONLY[event]
         if state in allowed_states:
             return TransitionResult(True, state)
         return TransitionResult(False, state, reason=f"{event.name} not allowed in {state.name}")
 
-    key = (state, event)
-    if key in _TRANSITIONS:
-        return TransitionResult(True, _TRANSITIONS[key])
+    # Check events allowed from any state (preserve state)
+    if event in _ALWAYS_ALLOWED:
+        return TransitionResult(True, state)
+
+    # Provide contextual error message for FAULT state
+    if state == State.FAULT:
+        return TransitionResult(
+            False, 
+            state, 
+            reason="Robot in FAULT state. Allowed exits: AUTO_RECOVER, HOME (both trigger recovery), or CLEAR_FAULT."
+        )
 
     return TransitionResult(False, state, reason=f"No transition for {state.name} + {event.name}")
 
@@ -195,5 +212,8 @@ def parse_event(cmd: str) -> Tuple[Event, dict]:
 
     if head == "START":
         return Event.START_STACK, {}
+
+    if head == "AUTO_RECOVER":
+        return Event.AUTO_RECOVER, None
 
     raise ValueError(f"Unknown command: {cmd}")

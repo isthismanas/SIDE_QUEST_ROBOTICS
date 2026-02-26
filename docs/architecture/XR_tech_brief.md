@@ -168,3 +168,6 @@ All safety logic resides on the Pi Task Controller.
 XR is supervisory layer only.
 
 ================================================================
+
+cd ~/SIDE_QUEST_ROBOTICS/Robotics/motion
+./run_controller.sh

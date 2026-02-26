@@ -26,6 +26,11 @@ from typing import Optional
 import robot_config as cfg
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE
+import drift_engine
+from logger import info, debug, warn
+
+
+cfg_pose_type = tuple[float, float, float, float, float, float]
 
 
 @dataclass
@@ -71,8 +76,146 @@ def initialize_stack_session(handles: SystemHandles) -> None:
 
 
 # ----------------------------
-# Robot motion actions
+# Fault recovery
 # ----------------------------
+
+def recover_from_fault(handles: SystemHandles) -> bool:
+    """
+    Best-effort recovery from a faulted state.
+    
+    Steps:
+    1. Query initial robot mode
+    2. If already in fault mode (9, 11), skip motion and return
+    3. Clear any error state
+    4. Re-enable the robot
+    5. Set safe speed factor
+    6. Move to safe home pose (joint motion)
+    7. Open gripper (gracefully skip if not connected)
+    8. Query final robot mode
+    
+    This is designed to be called after a FAULT event to attempt safe recovery.
+    Exceptions are caught and logged; fails gracefully rather than re-raising.
+    """
+    # Local helper to query robot mode safely
+    def _mode():
+        try:
+            m = handles.robot.robot_mode()
+            return None if m == -1 else m
+        except Exception:
+            return None
+
+    print("[RECOVERY] recover_from_fault: start")
+
+    # Query initial mode (for logging)
+    mode_before = _mode()
+    print(f"[RECOVERY] mode_before={mode_before}")
+
+    # If robot is not in fault, run lightweight re-center and return OK
+    if mode_before is not None and mode_before not in (9, 11):
+        try:
+            handles.robot.speed_factor(cfg.SPEED_PRECISION)
+            print(f"[RECOVERY] speed_factor={cfg.SPEED_PRECISION}")
+        except Exception as e:
+            print(f"[RECOVERY] speed_factor failed: {e}")
+        try:
+            handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
+            handles.robot.wait_until_idle()
+            print("[RECOVERY] moved to SAFE_HOME_POSE")
+        except Exception as e:
+            print(f"[RECOVERY] movj failed: {e}")
+            return False
+        try:
+            handles.gripper.open()
+            print("[RECOVERY] gripper opened")
+        except Exception as e:
+            print(f"[RECOVERY] gripper open failed: {e}")
+        print("[RECOVERY] recover_from_fault: complete (idempotent)")
+        return True
+
+    # Otherwise, proceed with full recovery
+    try:
+        resp = handles.robot.clear_error()
+        print(f"[RECOVERY] clear_error -> {resp}")
+    except Exception as e:
+        print(f"[RECOVERY] clear_error failed: {e}")
+
+    try:
+        resp = handles.robot.enable()
+        print(f"[RECOVERY] enable -> {resp}")
+    except Exception as e:
+        print(f"[RECOVERY] enable failed: {e}")
+
+    # Poll RobotMode up to 3s after ClearError + EnableRobot.
+    # Fail only on hard fault (9/11). Any other valid mode (>=0) is recoverable.
+    start_t = time.time()
+    timeout = 3.0
+    mode_after = None
+    while time.time() - start_t < timeout:
+        m = _mode()
+        if m is None:
+            time.sleep(0.25)
+            continue
+        if m in (9, 11):
+            print(f"[RECOVERY] mode_before={mode_before}")
+            print(f"[RECOVERY] mode_after={m}")
+            print("[RECOVERY] HARD FAULT detected during poll. Aborting.")
+            return False
+        if m >= 0:
+            mode_after = m
+            break
+        time.sleep(0.25)
+
+    if mode_after is None:
+        print(f"[RECOVERY] mode_before={mode_before}")
+        print(f"[RECOVERY] mode_after={mode_after}")
+        print("[RECOVERY] No valid RobotMode within timeout. Aborting.")
+        return False
+
+    print(f"[RECOVERY] mode_before={mode_before}")
+    print(f"[RECOVERY] mode_after={mode_after}")
+
+    # Proceed with recovery motions
+    try:
+        handles.robot.speed_factor(cfg.SPEED_PRECISION)
+        print(f"[RECOVERY] speed_factor={cfg.SPEED_PRECISION}")
+    except Exception as e:
+        print(f"[RECOVERY] speed_factor failed: {e}")
+
+    try:
+        handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
+        handles.robot.wait_until_idle()
+        print("[RECOVERY] moved to SAFE_HOME_POSE")
+    except Exception as e:
+        print(f"[RECOVERY] movj failed: {e}")
+        return False
+
+    try:
+        handles.gripper.open()
+        print("[RECOVERY] gripper opened")
+    except Exception as e:
+        print(f"[RECOVERY] gripper open failed: {e}")
+
+    print("[RECOVERY] recover_from_fault: complete")
+    return True
+
+
+def safe_reset_after_tumble(handles: SystemHandles, holding_block: bool) -> None:
+    """
+    Safe reset flow used after a tower tumble.
+
+    1) If currently holding a block, move to SAFE_DUMP_POSE and release.
+    2) Move to SAFE_HOME_POSE.
+    3) Ensure gripper is open (idempotent).
+    """
+    if holding_block:
+        handles.robot.movj_pose(cfg.SAFE_DUMP_POSE)
+        handles.gripper.open()
+        time.sleep(0.2)
+
+    handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
+    handles.gripper.open()
+
+
 
 def do_home(handles: SystemHandles) -> None:
     """Go to safe home pose."""
@@ -102,6 +245,26 @@ def do_nudge_yaw(handles: SystemHandles, dtheta_deg: float) -> None:
     """
     handles.robot.speed_factor(cfg.SPEED_PRECISION)
     handles.robot.relmovl_user(0, 0, 0, 0, 0, dtheta_deg)
+
+
+def _movj_speed_percent(handles: SystemHandles) -> int:
+    if getattr(cfg, "COMBO_ENABLED", True) and getattr(handles, "combo_active", False):
+        return int(max(1, min(100, getattr(cfg, "MOVEJ_SPEED_COMBO", 70))))
+    return int(max(1, min(100, getattr(cfg, "MOVEJ_SPEED_NORMAL", 35))))
+
+
+def movj_pose_combo(handles: SystemHandles, pose: cfg_pose_type) -> str:
+    desired_speed = _movj_speed_percent(handles)
+
+    if not hasattr(handles, "_last_movj_speed"):
+        handles._last_movj_speed = None
+
+    if desired_speed != handles._last_movj_speed:
+        warn("COMBO", f"MoveJ speed set to {desired_speed}% (combo_active={getattr(handles, 'combo_active', False)})")
+        handles._last_movj_speed = desired_speed
+
+    handles.robot.speed_factor(desired_speed)
+    return handles.robot.movj_pose(pose)
 
 
 # ----------------------------
@@ -138,15 +301,16 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
         pick_pose[5],
     )
 
-    print(f"[STACK] pick target side={side} level={level} pick_pose={pick_pose}")
-    print(f"[STACK] pick hover_pose={hover_pose}")
+    info("STACK", f"pick target side={side} level={level} pick_pose={pick_pose}")
+    debug("STACK", f"pick hover_pose={hover_pose}")
 
     # Joint transition into region
-    robot.movj_pose(hover_pose)
+    movj_pose_combo(handles, hover_pose)
     # Wait for joint motion to complete before linear descent
     robot.wait_until_idle()
 
     # Linear vertical descent
+    robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(pick_pose)
     # Ensure linear descent completed before actuating gripper
     robot.wait_until_idle()
@@ -155,12 +319,13 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
     time.sleep(0.5)
 
     # Linear vertical retract
+    robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(hover_pose)
     # Wait for retract to finish before joint exit
     robot.wait_until_idle()
 
     # Joint exit to neutral
-    robot.movj_pose(cfg.NEUTRAL_2)
+    movj_pose_combo(handles, cfg.NEUTRAL_2)
 
 
 def move_to_tower_hover(handles: SystemHandles, stack_level: int) -> None:
@@ -172,11 +337,24 @@ def move_to_tower_hover(handles: SystemHandles, stack_level: int) -> None:
     """
     robot = handles.robot
     hover_pose = cfg.tower_hover_pose(stack_level)
-    print(f"[STACK] tower hover level={stack_level} hover_pose={hover_pose}")
-    robot.movj_pose(hover_pose)
+    info("STACK", f"tower hover level={stack_level} hover_pose={hover_pose}")
+    movj_pose_combo(handles, hover_pose)
 
 
-def complete_place_sequence(handles: SystemHandles, stack_level: int) -> None:
+def complete_place_neutral_exit(handles: SystemHandles, stack_level: int) -> None:
+    """Final neutral MoveJ after placement, combo-aware."""
+    if stack_level >= 3:
+        movj_pose_combo(handles, cfg.NEUTRAL_3)
+    else:
+        movj_pose_combo(handles, cfg.NEUTRAL_2)
+
+
+def complete_place_sequence(
+    handles: SystemHandles,
+    stack_level: int,
+    place_pose: Optional[cfg_pose_type] = None,
+    perform_neutral_exit: bool = True,
+) -> None:
     """
     Deterministic placement completion with hybrid strategy.
     - MovL vertical descent to place position
@@ -190,38 +368,50 @@ def complete_place_sequence(handles: SystemHandles, stack_level: int) -> None:
     robot = handles.robot
     gripper = handles.gripper
 
-    place_pose = cfg.tower_place_pose(stack_level)
-    hover_pose = cfg.tower_hover_pose(stack_level)
+    if place_pose is None:
+        base_place_pose = cfg.tower_place_pose(stack_level)
+        place_pose = drift_engine.inject_drift(base_place_pose, stack_level)
+        info("DRIFT", f"stack_level={stack_level} base={base_place_pose} drifted={place_pose}")
+    else:
+        debug("DRIFT", f"using proposed pose stack_level={stack_level} pose={place_pose}")
+    retract_hover_pose = (
+        place_pose[0],
+        place_pose[1],
+        place_pose[2] + cfg.PLACE_CLEARANCE_MM,
+        place_pose[3],
+        place_pose[4],
+        place_pose[5],
+    )
 
     # Linear vertical descent
+    robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(place_pose)
 
     gripper.open()
     time.sleep(0.3)
 
     # Linear vertical retract
-    robot.movl_pose(hover_pose)
+    robot.speed_factor(cfg.SPEED_PRECISION)
+    robot.movl_pose(retract_hover_pose)
     # Ensure retract finished before joint exit
     robot.wait_until_idle()
 
     # Optional sidestep for very high stacks to reduce joint travel over tower
     if stack_level >= 5:
         sidestep_pose = (
-            hover_pose[0],
+            retract_hover_pose[0],
             -10.0,
-            hover_pose[2],
-            hover_pose[3],
-            hover_pose[4],
-            hover_pose[5],
+            retract_hover_pose[2],
+            retract_hover_pose[3],
+            retract_hover_pose[4],
+            retract_hover_pose[5],
         )
+        robot.speed_factor(cfg.SPEED_PRECISION)
         robot.movl_pose(sidestep_pose)
         robot.wait_until_idle()
 
-    # Select neutral exit based on stack height
-    if stack_level >= 3:
-        robot.movj_pose(cfg.NEUTRAL_3)
-    else:
-        robot.movj_pose(cfg.NEUTRAL_2)
+    if perform_neutral_exit:
+        complete_place_neutral_exit(handles, stack_level)
 
 
 # ----------------------------

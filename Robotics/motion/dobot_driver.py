@@ -14,6 +14,7 @@ This driver uses a persistent TCP socket to avoid rapid connect/disconnect issue
 import socket
 import time
 from typing import Optional, Tuple
+from logger import debug, info, warn
 
 
 Pose = Tuple[float, float, float, float, float, float]
@@ -164,11 +165,11 @@ class DobotDriver:
         Convenience: ClearError + EnableRobot + optional SpeedFactor.
         Intended to be called once per VR session, not per command.
         """
-        print(f"[DOBOT] ClearError -> {self.clear_error()}")
-        print(f"[DOBOT] EnableRobot -> {self.enable()}")
+        info("DOBOT", f"ClearError -> {self.clear_error()}")
+        info("DOBOT", f"EnableRobot -> {self.enable()}")
 
         if speed_percent is not None:
-            print(f"[DOBOT] SpeedFactor({speed_percent}) -> {self.speed_factor(speed_percent)}")
+            info("DOBOT", f"SpeedFactor({speed_percent}) -> {self.speed_factor(speed_percent)}")
 
         time.sleep(0.2)
 
@@ -176,9 +177,19 @@ class DobotDriver:
     # Queue execution control
     # ----------------------------
     def continue_queue(self) -> str:
+        """
+        Send Continue() to the robot.
+        Never raises RuntimeError. Prints warnings for empty or non-0 responses.
+        Returns resp for higher layer handling.
+        """
         cmd = "Continue()"
         resp = self.send(cmd)
-        self._assert_ok(resp, cmd)
+        if resp is None or resp == "":
+            warn("DOBOT", f"Warning: No response for {cmd}")
+            return resp
+        if not resp.strip().startswith("0,"):
+            warn("DOBOT", f"Warning: Continue() returned non-0 response: {resp}")
+            return resp
         return resp
 
     def robot_mode(self) -> int:
@@ -192,7 +203,7 @@ class DobotDriver:
         try:
             resp = self.send(cmd)
         except Exception as e:
-            print(f"[DOBOT] RobotMode() failed: {e}")
+            warn("DOBOT", f"RobotMode() failed: {e}")
             return -1
 
         # Try to parse second CSV field as integer
@@ -207,7 +218,8 @@ class DobotDriver:
                     raise ValueError(f"No numeric value in RobotMode response: {resp}")
                 return int(filtered)
         except Exception as e:
-            print(f"[DOBOT] Failed to parse RobotMode() response '{resp}': {e}")
+            if getattr(_cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+                warn("DOBOT", f"Failed to parse RobotMode() response '{resp}': {e}")
             return -1
 
     def wait_until_idle(self, timeout_s: float = 30.0, poll_s: float = 0.1) -> None:
@@ -223,23 +235,23 @@ class DobotDriver:
             mode = self.robot_mode()
             if mode >= 0:
                 if mode != last_mode:
-                    print(f"[DOBOT] RobotMode -> {mode}")
+                    debug("DOBOT", f"RobotMode -> {mode}")
                     last_mode = mode
                 # Treat 5 as idle (ROBOT_MODE_ENABLE). Do NOT treat 0 as idle.
                 if mode == 5:
                     return
                 # Handle error/collision modes conservatively
                 if mode in (9, 11):
-                    print(f"[DOBOT] RobotMode indicates fault/collision: {mode}")
+                    warn("DOBOT", f"RobotMode indicates fault/collision: {mode}")
                     return
             else:
                 # Parsing failed; fallback
-                print("[DOBOT] RobotMode parsing failed; falling back to short sleep")
+                warn("DOBOT", "RobotMode parsing failed; falling back to short sleep")
                 time.sleep(0.5)
                 return
 
             if (time.time() - start) > timeout_s:
-                print(f"[DOBOT] wait_until_idle timeout after {timeout_s}s (last mode={mode})")
+                warn("DOBOT", f"wait_until_idle timeout after {timeout_s}s (last mode={mode})")
                 return
 
             time.sleep(poll_s)
@@ -290,7 +302,7 @@ class DobotDriver:
         try:
             self.wait_until_idle()
         except Exception as e:
-            print(f"[DOBOT] wait_until_idle failed after MovJ: {e}")
+            warn("DOBOT", f"wait_until_idle failed after MovJ: {e}")
         return resp
 
     def movl_pose(self, pose: Pose) -> str:
@@ -304,7 +316,7 @@ class DobotDriver:
         try:
             self.wait_until_idle()
         except Exception as e:
-            print(f"[DOBOT] wait_until_idle failed after MovL: {e}")
+            warn("DOBOT", f"wait_until_idle failed after MovL: {e}")
         return resp
 
     def relmovl_user(self, dx: float, dy: float, dz: float, drx: float, dry: float, drz: float) -> str:
@@ -318,7 +330,7 @@ class DobotDriver:
         try:
             self.wait_until_idle()
         except Exception as e:
-            print(f"[DOBOT] wait_until_idle failed after RelMovLUser: {e}")
+            warn("DOBOT", f"wait_until_idle failed after RelMovLUser: {e}")
         return resp
 
     def go_home(self, speed_percent: Optional[int] = None) -> str:

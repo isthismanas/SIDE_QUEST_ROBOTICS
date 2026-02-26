@@ -5,13 +5,41 @@ Central configuration for Side Quest robot + gripper control.
 Keep ALL magic numbers here:
 - network/IP/ports
 - speed profiles
-- canonical poses
-- nudge step sizes
-- gripper RS485 parameters (Dev 7+)
-
-Units:
 - Poses: mm and degrees (Dobot dashboard convention)
 """
+
+# ----------------------------
+# Logging Configuration
+# ----------------------------
+# Run mode
+# Allowed: "COMP", "DEBUG"
+RUN_MODE = "COMP"
+
+# LOG_LEVEL sets the default logging level for all modules.
+# LOG_MODULES defines per-module overrides; module-level values supersede LOG_LEVEL.
+# Allowed levels: "DEBUG", "INFO", "WARN", "ERROR", "QUIET"
+LOG_LEVEL = "INFO"
+LOG_MODULES = {
+    "DOBOT": "WARN",
+    "CAM": "WARN",
+    "CONTROL": "INFO",
+    "ADMIN": "INFO",
+    "STACK": "WARN",
+    "DRIFT": "WARN"
+}
+
+if RUN_MODE == "COMP":
+    LOG_LEVEL = "WARN"
+    LOG_MODULES = {
+        "DOBOT": "WARN",
+        "STACK": "WARN",
+        "DRIFT": "WARN",
+        "CAM": "QUIET",
+        "CONTROL": "INFO",
+        "ADMIN": "INFO"
+    }
+elif RUN_MODE == "DEBUG":
+    LOG_LEVEL = "DEBUG"
 
 # ----------------------------
 # Network / Dobot Dashboard
@@ -27,7 +55,11 @@ SPEED_TRAVEL = 30        # larger moves (home <-> pick <-> hover)
 SPEED_PRECISION = 15     # nudges + placing (fine motion)
 
 # Combo mode (future): +10–20% travel only
-COMBO_SPEED_BONUS = 10
+COMBO_SPEED_BONUS = 10 #may be deprecated in favor of manual speed values provided
+COMBO_ENABLED = True
+COMBO_GREEN_PLACEMENTS_TARGET = 3
+MOVEJ_SPEED_NORMAL = 60
+MOVEJ_SPEED_COMBO = 90
 
 # ----------------------------
 # Poses (Cartesian pose={x,y,z,rx,ry,rz})
@@ -40,9 +72,10 @@ NEUTRAL_3 = (273.2320, -23.7896, 378.5702, -180.0, 0.0, -124.0,)
 # ----------------------------
 # Nudge Settings
 # ----------------------------
-NUDGE_STEP_MM = 3         # XY step per button press
+NUDGE_STEP_MM = 1         # XY step per button press
 NUDGE_YAW_DEG = 2         # yaw step per button press (optional)
 NUDGE_DZ_MM = 0           # Z locked by design
+NUDGE_COOLDOWN_S = 0.20   # minimum time between NUDGE commands
 
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
@@ -75,6 +108,12 @@ RIGHT_PICK_STEP_MM = 36.6                  # height step per level (right stack)
 
 # Tower position (destination) - measured/calibrated
 TOWER_BASE_POSE = (193.4597, -91.4552, 157.8142, 180.0, 0.0, -124.0)
+
+# Safe dump pose (used when tower tumbles)
+SAFE_DUMP_POSE = (197.4741, 49.1437, 156.6749, 180.0, 0.0, -124.0)
+
+# Session logging
+LOG_DIR = "logs"
 
 # ----------------------------
 # Gripper (Dev 7+) — RS485 Modbus RTU
@@ -132,3 +171,46 @@ def tower_hover_pose(level: int):
     """
     x, y, z0, rx, ry, rz = TOWER_BASE_POSE
     return (x, y, z0 + level * BLOCK_HEIGHT_MM + PLACE_CLEARANCE_MM, rx, ry, rz)
+
+
+# ----------------------------
+# Tolerance Engine (Robot-only, Dev 12)
+# ----------------------------
+TOL_GREEN_MM = 0.5
+TOL_YELLOW_MM = 2.5
+TOLERANCE_SCALE = 1.0
+
+# Risk escalation: if placement zone is RED, increase drift for next block
+DRIFT_RISK_INCREMENT = 0.15
+
+
+# ----------------------------
+# Drift Engine (Dev 10)
+# ----------------------------
+
+# Master toggle
+DRIFT_ENABLED = True
+
+# Deterministic run seed (change only when you want a new reproducible pattern)
+DRIFT_RUN_SEED = 12345
+
+# Baseline max XY drift in mm at 1x scale
+DRIFT_MAX_XY_MM = 5.0
+
+# Experimental scale multiplier (only knob you change during experiments)
+# 0.0 = no drift
+# 1.0 = baseline
+# 2.0 = double drift
+DRIFT_SCALE = 1.35
+
+# Distribution mode
+# "uniform" = random within square bounds
+# "grid"    = deterministic grid offsets
+# "fixed"   = always same offset direction
+DRIFT_MODE = "uniform"
+
+# Axis mask mode
+# "X"  -> drift only along X
+# "Y"  -> drift only along Y
+# "XY" -> drift along both axes (original behavior)
+DRIFT_AXIS_MODE = "X"
