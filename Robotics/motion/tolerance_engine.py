@@ -16,13 +16,15 @@ def radial_error_mm(pose: Pose) -> float:
 
 
 def classify_pose(pose: Pose) -> str:
-	r = radial_error_mm(pose)
-	g = cfg.TOLERANCE_GREEN_MM * cfg.TOLERANCE_SCALE
-	y = cfg.TOLERANCE_YELLOW_MM * cfg.TOLERANCE_SCALE
+	r_mm = radial_error_mm(pose)
+	green_mm = getattr(cfg, "TOL_GREEN_MM", 3.0)
+	yellow_mm = getattr(cfg, "TOL_YELLOW_MM", 6.0)
+	green_thr = green_mm * cfg.TOLERANCE_SCALE
+	yellow_thr = yellow_mm * cfg.TOLERANCE_SCALE
 
-	if r <= g:
+	if r_mm <= green_thr:
 		return "GREEN"
-	if r <= y:
+	if r_mm <= yellow_thr:
 		return "YELLOW"
 	return "RED"
 

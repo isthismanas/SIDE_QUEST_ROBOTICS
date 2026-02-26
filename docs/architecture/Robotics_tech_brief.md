@@ -1,8 +1,8 @@
-Robotics Technical Brief (v7)
+Robotics Technical Brief (v8)
 
 Project: Side Quest: The Leaning Tower of Regolith (ARC 2026 Target)
 Sub-Team: Robotics
-Last Updated: 24 Feb 2026 (Dev 9 – Fault Recovery Stabilized; Drift Integration Next)
+Last Updated: 26 Feb 2026 (Dev 12 – Tolerance Engine + Combo Flow B + Run Completion Stable)
 
 ================================================================
 
@@ -22,7 +22,7 @@ Limited teleoperation (NUDGE mode)
 
 Autonomous continuation to next block
 
-Combo-based speed boost mechanics
+Vision-driven performance classification (GREEN/YELLOW/RED) enabling combo-based speed boost mechanics
 
 Deterministic retreat geometry
 
@@ -239,32 +239,76 @@ Validated for full 7-block autonomous stacking.
 
 ================================================================
 
-5. Drift Injection Architecture (Dev 10 – In Progress)
+5. Drift Injection Architecture (Dev 10–12 Stable)
 
-Drift is injected at pose proposal stage:
+Drift is injected deterministically at the pose proposal stage:
 
 Detection → Base Transform → Drift Injection → Proposed Pose → Control Layer
 
 Properties:
 
-Z-axis excluded
+• Z-axis excluded
+• Orientation excluded
+• Bounded magnitude (configurable)
+• Deterministic per (run_seed, stack_level)
+• Adjustable via DRIFT_SCALE
+• Does not modify retreat geometry
+• Does not bypass safety envelopes
 
-Bounded magnitude
+Current ARC configuration (Dev 12):
 
-Deterministic per attempt (seedable)
+• Drift currently applied along X-axis only
+  (Y-axis temporarily muted until bidirectional nudge UI is re-enabled)
+• Deterministic seed-based injection
+• RED placements increase DRIFT_SCALE incrementally
 
-Configurable via robot_config.py
-
-Does not alter retreat geometry
-
-Does not bypass safety envelopes
-
-Drift modifies only proposed placement pose.
-Motion execution remains deterministic.
+Drift modifies only the proposed placement pose.
+Motion execution remains deterministic and safety-gated.
 
 ================================================================
 
-6. Vision Pose Integration (Upcoming Phase)
+6. Tolerance Engine (Dev 12 – Implemented)
+
+Classification occurs deterministically on the Raspberry Pi.
+
+The proposed placement pose (after drift + nudges) is evaluated against
+the tower base reference using radial XY distance:
+
+radial_error_mm = sqrt((x - x0)^2 + (y - y0)^2)
+
+Thresholds (configurable in robot_config.py):
+
+TOL_GREEN_MM
+TOL_YELLOW_MM
+TOLERANCE_SCALE
+
+Final ARC configuration (Dev 12):
+
+GREEN:
+radial_error_mm <= TOL_GREEN_MM * TOLERANCE_SCALE
+
+YELLOW:
+radial_error_mm <= TOL_YELLOW_MM * TOLERANCE_SCALE
+
+RED:
+exceeds YELLOW threshold
+
+Characteristics:
+
+• Radial (axis-independent) classification
+• Evaluated:
+    - At WAITING_FOR_DECISION
+    - After every NUDGE
+    - Immediately after successful DROP
+• Computed exclusively on Pi
+• Unity receives verdict only (ZONE GREEN/YELLOW/RED)
+
+Classification does not influence motion sequencing.
+It influences combo logic and visual feedback only.
+
+================================================================
+
+7. Vision Pose Integration (Upcoming Phase)
 
 Planned pipeline:
 
@@ -280,6 +324,23 @@ GREEN – tight tolerance
 YELLOW – moderate deviation
 RED – large deviation
 
+Classification Logic (Deterministic on Pi):
+
+Measured pose is compared against the proposed placement pose
+(after drift and nudge adjustments).
+
+GREEN:
+radial_error_xy <= X mm AND |dyaw| <= Y deg
+
+YELLOW:
+radial_error_xy within secondary bound
+
+RED:
+exceeds tolerance envelope
+
+Classification occurs immediately after placement completion
+before auto-continue is triggered.
+
 Computed on Pi.
 Rendered in Unity.
 
@@ -287,19 +348,50 @@ Vision does not sequence motion.
 
 ================================================================
 
-7. Combo Mode
+8. Combo Mode (Dev 12)
 
-If 3 consecutive GREEN placements:
+Activation Rule:
 
-Increase SpeedFactor by 10–20%
+3 consecutive successful GREEN placements
+trigger Combo Mode.
 
-Applies only to travel states.
-Precision states (NUDGE, PLACING) remain capped.
-Resets on YELLOW or RED.
+Behavior:
+
+• Speed boost activates immediately after the triggering DROP.
+• Boost applies only to MoveJ travel segments.
+• Boost persists until streak breaks.
+• MovL, vertical descents, gripper motions, and nudges remain at precision speed.
+
+Speed Model:
+
+MOVEJ_SPEED_NORMAL
+MOVEJ_SPEED_COMBO
+
+MoveJ speed is explicitly set before every MoveJ call.
+No percentage-bonus arithmetic is used.
+
+Combo resets on:
+
+• YELLOW placement
+• RED placement
+• FIX invocation #nope
+• NUDGE invocation #nope
+• FAULT state
+• TUMBLE event
+• Session reset
+
+Logging:
+
+[COMBO] <participant> combo achieved: 3x GREEN placements
+[COMBO] combo ended
+[COMBO] MoveJ speed set to X%
+
+Combo affects travel tempo only.
+It does not alter precision or safety constraints.
 
 ================================================================
 
-8. Safety Architecture
+9. Safety Architecture
 
 LED states:
 
@@ -327,62 +419,76 @@ Continue() failures no longer crash controller threads.
 
 ================================================================
 
-9. Current Development Status (Dev 9 Complete)
+10. Run Completion & Metrics (Dev 12)
+
+A run is considered COMPLETE when 7 successful placements occur.
+
+On completion:
+
+System waits 5 seconds (stabilization delay)
+Console prints:
+
+<participant> successfully placed 7 blocks in <seconds> seconds (COMPLETE)
+
+If tumble occurs before completion:
+
+<participant> successfully placed <n> blocks in <seconds> seconds (TUMBLE)
+
+Characteristics:
+
+• Elapsed time excludes post-completion delay
+• Computed entirely on Pi
+• Logged in COMP mode
+• No Unity dependency required
+
+(Planned next phase)
+Structured experiment logging to CSV
+will replace console-only logging for research reproducibility.
+
+================================================================
+
+11. Current Development Status (Dev 12 Stable)
 
 Completed:
 
-Deterministic 7-block stacking
+• Deterministic 7-block stacking
+• Stabilized retreat geometry
+• Fault detection & AUTO_RECOVER
+• Drift injection (deterministic)
+• Tolerance engine (radial classification)
+• World-space ZONE visualization in Unity
+• Combo Mode Flow B (MoveJ-only speed boost)
+• Immediate combo activation timing
+• Run completion metrics (COMP / TUMBLE)
+• Nudge UX stabilized (non-ACK mode)
+• Continue() hardened
+• VR-session arming model stable
 
-Stabilized retreat geometry
+Next Phase:
 
-State machine modularization
-
-Admin recovery port (8089)
-
-AUTO_RECOVER routine
-
-FAULT state enforcement
-
-Continue() hardened
-
-Graceful shutdown (no DepthAI abort)
-
-VR-session arming model stable
-
-Next Phase (Dev 10):
-
-Drift Engine integration
-
-Vision pose estimation integration
-
-Tolerance engine activation
-
-XR overlay of proposed vs measured pose
-
-Full-cycle Drift + Vision stress testing
+• Structured CSV experiment logging
+• Re-enable Y-axis drift (after bidirectional nudge UI)
+• Vision-based pose estimation integration
+• Full drift + vision stress testing
+• ARC reliability hardening & operator UX polish
 
 ================================================================
 
 10. Software Layer Separation
 
-The robotics control stack is divided into:
+10. Software Layer Separation
 
-task_controller.py (TCP + orchestration)
+task_controller.py        – TCP + orchestration
+state_machine.py          – transition rules + gating
+actions.py                – robot + gripper side-effects
+dobot_driver.py           – Dobot TCP driver
+dh_gripper.py             – RS485 Modbus driver
+drift_engine.py           – deterministic pose perturbation
+tolerance_engine.py       – radial classification logic
+robot_config.py           – configuration + speed profiles
 
-state_machine.py (transition rules + gating)
-
-actions.py (robot + gripper side-effects)
-
-dobot_driver.py (Dobot TCP driver)
-
-dh_gripper.py (RS485 Modbus driver)
-
-robot_config.py (configuration + pose definitions)
-
-(Upcoming) drift_engine.py
-
-(Upcoming) vision_engine.py
-
-This separation reduces cross-module coupling and improves robustness for ARC deployment.
+(Upcoming)
+vision_engine.py          – camera-based pose estimation
+experiment_logger.py      – structured CSV run logging
 
 ================================================================

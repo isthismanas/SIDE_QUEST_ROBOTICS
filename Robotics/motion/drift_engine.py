@@ -58,6 +58,14 @@ def compute_drift(stack_level: int) -> Tuple[float, float]:
         dx = rng.uniform(-effective_max, effective_max)
         dy = rng.uniform(-effective_max, effective_max)
 
+    axis_mode = getattr(cfg, "DRIFT_AXIS_MODE", "XY").upper()
+
+    if axis_mode == "X":
+        dy = 0.0
+    elif axis_mode == "Y":
+        dx = 0.0
+    # else: XY = no change
+
     return dx, dy
 
 

@@ -33,6 +33,7 @@ MXID_MANAGER   = "194430108183F12E00"
 # --- Gripper ---
 LAST_GRIP_TS = 0.0
 GRIP_DEBOUNCE_S = 0.40
+_last_nudge_t = 0.0
 
 # Deterministic gripper positions (calibrated by you)
 GRIP_OPEN_POS  = 900
@@ -50,6 +51,7 @@ gripper = DHGripperPGE(
 
 # --- System handles (dependency injection) ---
 handles = SystemHandles(robot=robot, gripper=gripper)
+handles.combo_active = False
 
 gripper_connected = False
 
@@ -71,6 +73,7 @@ _WORKER_THREADS: list[threading.Thread] = []
 participant_name = None
 session_id = None
 tower_attempt_start_ts = None
+run_start_time = None
 block_attempt_start_ts = None
 holding_block = False
 current_session_token = uuid4()
@@ -78,6 +81,8 @@ proposed_place_pose = None
 proposed_place_stack_level = None
 current_zone = "GREEN"
 current_zone_stack_level = None
+green_place_streak = 0
+combo_active = False
 _unity_command_conn = None
 _last_sent_zone = None
 
@@ -175,6 +180,17 @@ def log_event(event: str, **fields) -> None:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:
         warn("CONTROL", f"[LOG] Failed to write event {event}: {e}")
+
+
+def emit_run_summary(reason: str) -> float:
+    now_mono = time.monotonic()
+    start_ts = run_start_time if run_start_time is not None else now_mono
+    duration_s = max(0.0, now_mono - start_ts)
+    participant = participant_name.strip() if isinstance(participant_name, str) and participant_name.strip() else "UNKNOWN"
+    placed = int(current_stack_level) if current_stack_level is not None else 0
+    summary_reason = reason.strip().upper() if isinstance(reason, str) and reason.strip() else "UNKNOWN"
+    warn("STACK", f"{participant} successfully placed {placed} blocks in {duration_s:.1f} seconds ({summary_reason})")
+    return duration_s
 
 
 # --- SIGNIFIER: prove which file is running ---
@@ -317,17 +333,25 @@ def _module_for_source(source: str) -> str:
     return "ADMIN" if source == "ADMIN" else "CONTROL"
 
 
+def _send_line_to_unity(line: str) -> bool:
+    if _unity_command_conn is None:
+        return False
+    try:
+        _unity_command_conn.sendall(f"{line}\n".encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
+
 def _push_zone_if_needed(force: bool = False) -> None:
     global _last_sent_zone
     if _unity_command_conn is None:
         return
     if not force and _last_sent_zone == current_zone:
         return
-    try:
-        _unity_command_conn.sendall(f"ZONE {current_zone}\n".encode("utf-8"))
+    sent = _send_line_to_unity(f"ZONE {current_zone}")
+    if sent:
         _last_sent_zone = current_zone
-    except Exception:
-        pass
 
 
 def _handle_post_tower_hover(module: str, my_token) -> bool:
@@ -389,9 +413,10 @@ def handle_command(cmd_str: str, source: str) -> None:
     """
     global STATE, robot_armed, gripper_connected, controller_busy
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
-    global participant_name, session_id, tower_attempt_start_ts, block_attempt_start_ts, holding_block, current_session_token
+    global participant_name, session_id, tower_attempt_start_ts, run_start_time, block_attempt_start_ts, holding_block, current_session_token
     global proposed_place_pose, proposed_place_stack_level
-    global current_zone, current_zone_stack_level
+    global current_zone, current_zone_stack_level, green_place_streak, combo_active
+    global _last_nudge_t
 
     # Normalize command
     if cmd_str == "COMMIT":
@@ -414,6 +439,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         current_pick_index = 0
         session_id = f"{int(time.time())}-{uuid4().hex[:8]}"
         tower_attempt_start_ts = None
+        run_start_time = None
         block_attempt_start_ts = None
         holding_block = False
         controller_busy = False
@@ -422,6 +448,9 @@ def handle_command(cmd_str: str, source: str) -> None:
         proposed_place_stack_level = None
         current_zone = "GREEN"
         current_zone_stack_level = None
+        green_place_streak = 0
+        combo_active = False
+        handles.combo_active = combo_active
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
         info("CONTROL", f"Participant set: {participant_name}. Ready to START.")
         return
@@ -431,16 +460,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         controller_busy = False
         # Run summary before any state/session reset
         blocks_placed = current_stack_level
-        now_mono = time.monotonic()
-        run_time_s = None
-        if tower_attempt_start_ts is not None:
-            run_time_s = now_mono - tower_attempt_start_ts
-
-        name_for_summary = participant_name if participant_name else "Unknown participant"
-        if run_time_s is not None:
-            info(module, f"{name_for_summary} successfully placed {blocks_placed} blocks in {run_time_s:.1f} seconds")
-        else:
-            info(module, f"{name_for_summary} successfully placed {blocks_placed} blocks (time unavailable)")
+        run_time_s = emit_run_summary("TUMBLE")
 
         log_event(
             "EVENT_RUN_SUMMARY",
@@ -464,11 +484,15 @@ def handle_command(cmd_str: str, source: str) -> None:
         controller_busy = False
         participant_name = None
         tower_attempt_start_ts = None
+        run_start_time = None
         block_attempt_start_ts = None
         proposed_place_pose = None
         proposed_place_stack_level = None
         current_zone = "GREEN"
         current_zone_stack_level = None
+        green_place_streak = 0
+        combo_active = False
+        handles.combo_active = combo_active
         if getattr(cfg, "RUN_MODE", "DEBUG") == "COMP" and vr_connected:
             print("Waiting for participant name...")
         return
@@ -582,10 +606,15 @@ def handle_command(cmd_str: str, source: str) -> None:
             if current_stack_level == 0:
                 current_session_token = uuid4()
                 tower_attempt_start_ts = time.monotonic()
+                run_start_time = tower_attempt_start_ts
+                green_place_streak = 0
+                combo_active = False
+                handles.combo_active = combo_active
 
             # Execute pick sequence
             my_token = current_session_token
             side, level = cfg.PICK_SEQUENCE[current_pick_index]
+            handles.combo_active = combo_active
             actions.execute_pick_sequence(handles, side, level)
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
@@ -607,6 +636,7 @@ def handle_command(cmd_str: str, source: str) -> None:
 
                 # Immediately move to tower hover
                 if STATE == State.MOVING_TO_TOWER_HOVER:
+                    handles.combo_active = combo_active
                     actions.move_to_tower_hover(handles, current_stack_level)
                     if not _handle_post_tower_hover(module, my_token):
                         return
@@ -621,6 +651,13 @@ def handle_command(cmd_str: str, source: str) -> None:
         if controller_busy:
             warn(module, "[GATE] Controller busy.")
             return
+        now = time.time()
+        cooldown_s = getattr(cfg, "NUDGE_COOLDOWN_S", 0.20)
+        if (now - _last_nudge_t) < cooldown_s:
+            if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+                info(module, f"[GATE] NUDGE_XY ignored: cooldown ({cooldown_s:.2f}s)")
+            return
+        _last_nudge_t = now
         controller_busy = True
         try:
             actions.do_nudge_xy(handles, payload["dx"], payload["dy"])
@@ -645,6 +682,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     STATE = fault_result.next_state
                     info(module, f"[SM] -> {STATE.name} (FAULT)")
                 return
+            
         finally:
             controller_busy = False
 
@@ -652,6 +690,13 @@ def handle_command(cmd_str: str, source: str) -> None:
         if controller_busy:
             warn(module, "[GATE] Controller busy.")
             return
+        now = time.time()
+        cooldown_s = getattr(cfg, "NUDGE_COOLDOWN_S", 0.20)
+        if (now - _last_nudge_t) < cooldown_s:
+            if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+                info(module, f"[GATE] NUDGE_YAW ignored: cooldown ({cooldown_s:.2f}s)")
+            return
+        _last_nudge_t = now
         controller_busy = True
         try:
             actions.do_nudge_yaw(handles, payload["dtheta"])
@@ -676,6 +721,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     STATE = fault_result.next_state
                     info(module, f"[SM] -> {STATE.name} (FAULT)")
                 return
+            _send_line_to_unity("NUDGE_DONE")
         finally:
             controller_busy = False
 
@@ -692,21 +738,64 @@ def handle_command(cmd_str: str, source: str) -> None:
         controller_busy = True
         try:
             my_token = current_session_token
+            zone_at_commit = "UNKNOWN"
             # Attempt placement with error handling
             try:
+                handles.combo_active = combo_active
                 if proposed_place_pose is not None and proposed_place_stack_level == current_stack_level:
-                    actions.complete_place_sequence(handles, current_stack_level, place_pose=proposed_place_pose)
+                    actions.complete_place_sequence(
+                        handles,
+                        current_stack_level,
+                        place_pose=proposed_place_pose,
+                        perform_neutral_exit=False,
+                    )
                 else:
-                    actions.complete_place_sequence(handles, current_stack_level)
+                    actions.complete_place_sequence(
+                        handles,
+                        current_stack_level,
+                        perform_neutral_exit=False,
+                    )
                 # Immediate RobotMode check after motion
                 m = handles.robot.robot_mode()
                 if m in (9, 11):
+                    green_place_streak = 0
+                    if combo_active:
+                        combo_active = False
+                        handles.combo_active = combo_active
+                        warn("COMBO", "combo ended")
                     warn(module, f"[FAULT] RobotMode={m} -> entering FAULT")
                     fault_result = step(STATE, Event.FAULT)
                     if fault_result.allowed:
                         STATE = fault_result.next_state
                         info(module, f"[SM] -> {STATE.name} (FAULT)")
                     return
+
+                if current_zone_stack_level == current_stack_level:
+                    zone_at_commit = current_zone
+                elif proposed_place_pose is not None:
+                    zone_at_commit = tolerance_engine.classify_pose(proposed_place_pose)
+
+                if getattr(cfg, "COMBO_ENABLED", True):
+                    if zone_at_commit == "GREEN":
+                        green_place_streak += 1
+                    else:
+                        green_place_streak = 0
+                        if combo_active:
+                            combo_active = False
+                            handles.combo_active = combo_active
+                            warn("COMBO", "combo ended")
+
+                    combo_target = int(getattr(cfg, "COMBO_GREEN_PLACEMENTS_TARGET", 3))
+                    if combo_target > 0 and green_place_streak >= combo_target:
+                        participant = participant_name.strip() if isinstance(participant_name, str) and participant_name.strip() else "UNKNOWN"
+                        warn("COMBO", f"{participant} combo achieved: {combo_target}x GREEN placements")
+                        combo_active = True
+                        handles.combo_active = combo_active
+                        green_place_streak = 0
+
+                handles.combo_active = combo_active
+                actions.complete_place_neutral_exit(handles, current_stack_level)
+
                 if current_zone_stack_level == current_stack_level and current_zone == "RED":
                     cfg.DRIFT_SCALE = min(3.0, float(cfg.DRIFT_SCALE) + float(cfg.DRIFT_RISK_INCREMENT))
                 holding_block = False
@@ -715,6 +804,11 @@ def handle_command(cmd_str: str, source: str) -> None:
                 current_zone = "GREEN"
                 current_zone_stack_level = None
             except Exception as e:
+                green_place_streak = 0
+                if combo_active:
+                    combo_active = False
+                    handles.combo_active = combo_active
+                    warn("COMBO", "combo ended")
                 warn(module, f"[STACK] Place failed: {e}")
                 proposed_place_pose = None
                 proposed_place_stack_level = None
@@ -731,6 +825,8 @@ def handle_command(cmd_str: str, source: str) -> None:
             current_stack_level += 1
             current_pick_index += 1
 
+            tower_complete = current_stack_level >= target_stack_count
+
             # Emit internal progression event
             if my_token != current_session_token:
                 return
@@ -738,6 +834,13 @@ def handle_command(cmd_str: str, source: str) -> None:
             if result4.allowed:
                 STATE = result4.next_state
                 info(module, f"[SM] -> {STATE.name} (PLACE_COMPLETE)")
+
+                if tower_complete:
+                    emit_run_summary("COMPLETE")
+                    _send_line_to_unity(f"RUN_COMPLETE {current_stack_level}")
+                    time.sleep(5.0)
+                    info(module, "[STACK] COMPLETE summary emitted (post-wait)")
+                    return
 
                 # Auto-continue stacking if enabled and targets remain
                 if stacking_enabled and current_stack_level < target_stack_count and current_pick_index < len(cfg.PICK_SEQUENCE):
@@ -749,6 +852,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         STATE = auto_result.next_state
                         my_token = current_session_token
                         side, level = cfg.PICK_SEQUENCE[current_pick_index]
+                        handles.combo_active = combo_active
                         actions.execute_pick_sequence(handles, side, level)
                         # Immediate RobotMode check after motion (auto-continue)
                         m = handles.robot.robot_mode()
@@ -765,6 +869,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         if result2.allowed:
                             STATE = result2.next_state
                             if STATE == State.MOVING_TO_TOWER_HOVER:
+                                handles.combo_active = combo_active
                                 actions.move_to_tower_hover(handles, current_stack_level)
                                 if not _handle_post_tower_hover(module, my_token):
                                     return
@@ -826,6 +931,7 @@ def command_server():
     global proposed_place_pose, proposed_place_stack_level, current_zone, current_zone_stack_level
     global _unity_command_conn, _last_sent_zone
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
+    global green_place_streak, combo_active
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -865,6 +971,9 @@ def command_server():
             stacking_enabled = True
             target_stack_count = min(7, len(cfg.PICK_SEQUENCE))
             controller_busy = False
+            green_place_streak = 0
+            combo_active = False
+            handles.combo_active = combo_active
 
             # Arm once for this VR session
             try:

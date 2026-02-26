@@ -27,7 +27,7 @@ import robot_config as cfg
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE
 import drift_engine
-from logger import info, debug
+from logger import info, debug, warn
 
 
 cfg_pose_type = tuple[float, float, float, float, float, float]
@@ -247,6 +247,26 @@ def do_nudge_yaw(handles: SystemHandles, dtheta_deg: float) -> None:
     handles.robot.relmovl_user(0, 0, 0, 0, 0, dtheta_deg)
 
 
+def _movj_speed_percent(handles: SystemHandles) -> int:
+    if getattr(cfg, "COMBO_ENABLED", True) and getattr(handles, "combo_active", False):
+        return int(max(1, min(100, getattr(cfg, "MOVEJ_SPEED_COMBO", 70))))
+    return int(max(1, min(100, getattr(cfg, "MOVEJ_SPEED_NORMAL", 35))))
+
+
+def movj_pose_combo(handles: SystemHandles, pose: cfg_pose_type) -> str:
+    desired_speed = _movj_speed_percent(handles)
+
+    if not hasattr(handles, "_last_movj_speed"):
+        handles._last_movj_speed = None
+
+    if desired_speed != handles._last_movj_speed:
+        warn("COMBO", f"MoveJ speed set to {desired_speed}% (combo_active={getattr(handles, 'combo_active', False)})")
+        handles._last_movj_speed = desired_speed
+
+    handles.robot.speed_factor(desired_speed)
+    return handles.robot.movj_pose(pose)
+
+
 # ----------------------------
 # Stacking: Pick & Place (Hybrid MovJ/MovL)
 # ----------------------------
@@ -285,11 +305,12 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
     debug("STACK", f"pick hover_pose={hover_pose}")
 
     # Joint transition into region
-    robot.movj_pose(hover_pose)
+    movj_pose_combo(handles, hover_pose)
     # Wait for joint motion to complete before linear descent
     robot.wait_until_idle()
 
     # Linear vertical descent
+    robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(pick_pose)
     # Ensure linear descent completed before actuating gripper
     robot.wait_until_idle()
@@ -298,12 +319,13 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
     time.sleep(0.5)
 
     # Linear vertical retract
+    robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(hover_pose)
     # Wait for retract to finish before joint exit
     robot.wait_until_idle()
 
     # Joint exit to neutral
-    robot.movj_pose(cfg.NEUTRAL_2)
+    movj_pose_combo(handles, cfg.NEUTRAL_2)
 
 
 def move_to_tower_hover(handles: SystemHandles, stack_level: int) -> None:
@@ -316,10 +338,23 @@ def move_to_tower_hover(handles: SystemHandles, stack_level: int) -> None:
     robot = handles.robot
     hover_pose = cfg.tower_hover_pose(stack_level)
     info("STACK", f"tower hover level={stack_level} hover_pose={hover_pose}")
-    robot.movj_pose(hover_pose)
+    movj_pose_combo(handles, hover_pose)
 
 
-def complete_place_sequence(handles: SystemHandles, stack_level: int, place_pose: Optional[cfg_pose_type] = None) -> None:
+def complete_place_neutral_exit(handles: SystemHandles, stack_level: int) -> None:
+    """Final neutral MoveJ after placement, combo-aware."""
+    if stack_level >= 3:
+        movj_pose_combo(handles, cfg.NEUTRAL_3)
+    else:
+        movj_pose_combo(handles, cfg.NEUTRAL_2)
+
+
+def complete_place_sequence(
+    handles: SystemHandles,
+    stack_level: int,
+    place_pose: Optional[cfg_pose_type] = None,
+    perform_neutral_exit: bool = True,
+) -> None:
     """
     Deterministic placement completion with hybrid strategy.
     - MovL vertical descent to place position
@@ -349,12 +384,14 @@ def complete_place_sequence(handles: SystemHandles, stack_level: int, place_pose
     )
 
     # Linear vertical descent
+    robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(place_pose)
 
     gripper.open()
     time.sleep(0.3)
 
     # Linear vertical retract
+    robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(retract_hover_pose)
     # Ensure retract finished before joint exit
     robot.wait_until_idle()
@@ -369,14 +406,12 @@ def complete_place_sequence(handles: SystemHandles, stack_level: int, place_pose
             retract_hover_pose[4],
             retract_hover_pose[5],
         )
+        robot.speed_factor(cfg.SPEED_PRECISION)
         robot.movl_pose(sidestep_pose)
         robot.wait_until_idle()
 
-    # Select neutral exit based on stack height
-    if stack_level >= 3:
-        robot.movj_pose(cfg.NEUTRAL_3)
-    else:
-        robot.movj_pose(cfg.NEUTRAL_2)
+    if perform_neutral_exit:
+        complete_place_neutral_exit(handles, stack_level)
 
 
 # ----------------------------

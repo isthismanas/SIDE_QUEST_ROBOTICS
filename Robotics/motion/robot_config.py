@@ -34,7 +34,7 @@ if RUN_MODE == "COMP":
         "DOBOT": "WARN",
         "STACK": "WARN",
         "DRIFT": "WARN",
-        "CAM": "WARN",
+        "CAM": "QUIET",
         "CONTROL": "INFO",
         "ADMIN": "INFO"
     }
@@ -55,7 +55,11 @@ SPEED_TRAVEL = 30        # larger moves (home <-> pick <-> hover)
 SPEED_PRECISION = 15     # nudges + placing (fine motion)
 
 # Combo mode (future): +10–20% travel only
-COMBO_SPEED_BONUS = 10
+COMBO_SPEED_BONUS = 10 #may be deprecated in favor of manual speed values provided
+COMBO_ENABLED = True
+COMBO_GREEN_PLACEMENTS_TARGET = 3
+MOVEJ_SPEED_NORMAL = 60
+MOVEJ_SPEED_COMBO = 90
 
 # ----------------------------
 # Poses (Cartesian pose={x,y,z,rx,ry,rz})
@@ -68,9 +72,10 @@ NEUTRAL_3 = (273.2320, -23.7896, 378.5702, -180.0, 0.0, -124.0,)
 # ----------------------------
 # Nudge Settings
 # ----------------------------
-NUDGE_STEP_MM = 3         # XY step per button press
+NUDGE_STEP_MM = 1         # XY step per button press
 NUDGE_YAW_DEG = 2         # yaw step per button press (optional)
 NUDGE_DZ_MM = 0           # Z locked by design
+NUDGE_COOLDOWN_S = 0.20   # minimum time between NUDGE commands
 
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
@@ -171,8 +176,8 @@ def tower_hover_pose(level: int):
 # ----------------------------
 # Tolerance Engine (Robot-only, Dev 12)
 # ----------------------------
-TOLERANCE_GREEN_MM = 3.0
-TOLERANCE_YELLOW_MM = 6.0
+TOL_GREEN_MM = 0.5
+TOL_YELLOW_MM = 2.5
 TOLERANCE_SCALE = 1.0
 
 # Risk escalation: if placement zone is RED, increase drift for next block
@@ -203,3 +208,9 @@ DRIFT_SCALE = 1.35
 # "grid"    = deterministic grid offsets
 # "fixed"   = always same offset direction
 DRIFT_MODE = "uniform"
+
+# Axis mask mode
+# "X"  -> drift only along X
+# "Y"  -> drift only along Y
+# "XY" -> drift along both axes (original behavior)
+DRIFT_AXIS_MODE = "X"
