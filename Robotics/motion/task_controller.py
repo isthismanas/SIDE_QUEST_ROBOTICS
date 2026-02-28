@@ -295,30 +295,27 @@ def camera_server(mxid, port, label):
             
             # Start perception worker (e.g., on INSPECTOR feed)
             if enable_rawL and q_raw is not None:
-                # Note: You would normally fetch and provide camera intrinsics here
                 try:
+                    import numpy as np
+                    info("VISION", "Extracting Factory Lens Calibration from OAK-D...")
+                    
+                    # 1. Request the onboard EEPROM calibration dataset from the device
+                    calibData = device.readCalibration()
+                    
+                    # 2. Extract the 3x3 Intrinsic Matrix for the Left Mono Camera (CAM_B)
+                    camera_matrix = np.array(calibData.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720))
+                    
+                    # 3. Extract the 14x1 Distortion Coefficients array
+                    dist_coeffs = np.array(calibData.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B))
+                    
+                    # 4. Feed the perfect math into the engine
+                    perc_engine.update_intrinsics(camera_matrix, dist_coeffs)
+
+                    # 5. Start the background thread utilizing the raw camera frames
                     perc_engine.start_worker(q_raw, None)
                     perc_started = True
                 except Exception as e:
-                    warn("PERC", f"[{label}] Failed to start perception worker: {e}")
-            if label == "INSPECTOR":
-                import numpy as np
-                info("VISION", "Extracting Factory Lens Calibration from OAK-D...")
-                
-                # 1. Request the onboard EEPROM calibration dataset from the device
-                calibData = device.readCalibration()
-                
-                # 2. Extract the 3x3 Intrinsic Matrix for the Left Mono Camera (CAM_B)
-                camera_matrix = np.array(calibData.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720))
-                
-                # 3. Extract the 14x1 Distortion Coefficients array
-                dist_coeffs = np.array(calibData.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B))
-                
-                # 4. Feed the perfect math into the engine
-                perc_engine.update_intrinsics(camera_matrix, dist_coeffs)
-
-                # 5. Start the background thread utilizing the raw camera frames
-                perc_engine.start_worker(q_raw, None)
+                    warn("PERC", f"[{label}] Failed to start perception worker or extract intrinsics: {e}")
 
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
