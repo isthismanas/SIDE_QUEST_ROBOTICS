@@ -1,7 +1,8 @@
 XR Technical Brief (v5)
 
 Project: Side Quest: The Leaning Tower of Regolith (ARC 2026) Target
-Sub-Team: XR Last Updated: 23 Feb 2026 (Aligned with Robotics Dev 7)
+Sub-Team: XR 
+Last Updated: 26 Feb 2026 (Aligned with Robotics Dev 12 – Tolerance + Combo Active)
 
 ================================================================
 
@@ -75,97 +76,158 @@ Each stream handled independently to avoid blocking and latency spikes.
 
 ================================================================
 
-5.  Command Highway (Supervisory Control)
+5. Command Highway (Supervisory Control)
 
 Dedicated TCP control channel (Port 8088).
 
-Protocol: - UTF-8 string packets - Stateless command triggers
+Protocol:
+• UTF-8 newline-delimited string packets
+• Stateless high-level intent commands
+• Pi remains single source of truth
 
-Example Commands:
+Example Outbound Commands (Unity → Pi):
 
-PICK DROP FIX NUDGE dx dy NUDGE_YAW dtheta CANCEL HOME
+START
+DROP
+FIX
+NUDGE dx dy
+NUDGE_YAW dtheta
+HOME
+CANCEL
 
-Flow: Unity sends command → Pi receives → Task Controller transitions
-state → Motion Driver executes
+Inbound Status Messages (Pi → Unity):
 
-Video stream is fully isolated from control channel.
+ZONE GREEN
+ZONE YELLOW
+ZONE RED
+
+Unity never evaluates placement correctness.
+Zone classification is computed on the Pi and broadcast to XR.
+
+Flow:
+
+Unity sends high-level intent →
+Pi Task Controller evaluates state →
+Motion Driver executes →
+Pi broadcasts updated ZONE →
+Unity updates visual indicator
+
+Video stream remains fully isolated from control channel.
 
 ================================================================
 
-6.  Operator Interface Design
+6. Operator Interface Design (Dev 12)
 
 6.1 Diegetic Control Room
 
-Video projected onto curved industrial monitor.
+Video feeds are projected onto a curved industrial monitor surface.
 
-Design intent: XR acts as “window into site” not floating HUD.
+Design principle:
+XR acts as a "window into the site" rather than a floating HUD.
 
 6.2 Stereo Rendering
 
 Custom Shader Graph:
+• Dual texture inputs
+• Eye Index node branches per eye
+• Each eye receives correct camera feed
+• Stable stereoscopic perception
 
--   Dual texture inputs
--   Eye Index node branches per eye
--   Each eye receives correct camera feed
+6.3 World-Space Physical Controls
 
-6.3 World-Space UI
+Buttons are mounted physically on the monitor bezel:
 
-Buttons mounted physically on monitor bezel:
+• START
+• DROP
+• FIX
+• NUDGE (Left / Right currently active)
+• HOME
 
--   View switching
--   FIX
--   DROP
--   NUDGE controls
--   HOME
--   START
+Buttons send high-level TCP commands only.
 
-Buttons trigger TCP commands only.
+6.4 Placement Feedback Indicator (Dev 12)
+
+A world-space ZoneIndicator object (simple sphere mesh) provides
+immediate placement classification feedback.
+
+Color Mapping:
+
+GREEN  – Within tight tolerance
+YELLOW – Moderate deviation
+RED    – Outside tolerance
+
+Characteristics:
+
+• Pure 3D object (no Canvas dependency)
+• Updated via RobotCommandPipe.OnZoneChanged event
+• Visible in Game view and VR
+• No authority over robot motion
+
+XR renders classification only.
+XR does not compute classification.
 
 ================================================================
 
-7.  Current Development Status
+7. Current Development Status (Dev 12)
 
 Completed:
 
--   Stable dual-camera stereo stream
--   Hardware-encoded JPEG pipeline
--   Threaded TCP video bridge
--   Working Unity shader graph
--   Functional Unity ↔ Pi command link
--   New command: START (begins autonomous pick → tower hover → WAITING_FOR_DECISION)
+• Stable dual-camera stereo stream
+• Hardware-encoded JPEG pipeline
+• Threaded TCP video bridge
+• Stable Unity ↔ Pi command channel
+• START command integration (autonomous loop begins from XR)
+• Real-time ZONE feedback (GREEN/YELLOW/RED)
+• World-space ZoneIndicator visualization
+• Stable NUDGE controls (X-axis active)
+• Reconnect logic functional
+
+XR now fully aligned with Robotics Dev 12 control loop.
 
 In Progress:
 
--   Full robot motion integration (Dev 7 alignment)
--   VR button → state machine mapping
--   Overlay projection for tolerance visualization
+• Bidirectional (XY) nudge UI
+• Drift visualization (ghost brick concept)
+• Structured run feedback overlays
 
 ================================================================
 
-8.  Future Roadmap
+8. Future Roadmap
 
-Phase 1 – Motion Primitives Integration - Complete PICK / DROP loop via
-XR
+Phase 1 – Bidirectional Nudge Controls
+• Add Y-axis controls
+• Re-enable full XY drift challenge
 
-Phase 2 – Tolerance Engine - Aruco pose tracking on Pi - Alignment
-overlays in Unity
+Phase 2 – Drift Visualization
+• Ghost brick projection
+• Visual comparison of proposed vs corrected pose
 
-Phase 3 – Drift Visualization - Visualize proposed vs corrected pose -
-Ghost brick projection
+Phase 3 – Vision Overlay Integration
+• Aruco pose overlays
+• Real-time deviation vector display
 
-Phase 4 – Robustness - Lost connection handling - Reconnect logic -
-Frame-drop mitigation
+Phase 4 – Robustness & ARC Hardening
+• Lost connection handling UX
+• Operator status panel
+• Frame-drop mitigation
+• Minimalist competition mode UI
 
 ================================================================
 
 9.  Safety & Control Boundaries
 
-Unity: - Cannot directly send joint commands - Cannot change speed
-factors - Cannot override safety constraints
+Unity:
+
+• Cannot send joint-level commands
+• Cannot modify speed factors
+• Cannot override safety constraints
+• Cannot compute placement verdicts
 
 All safety logic resides on the Pi Task Controller.
 
-XR is supervisory layer only.
+XR is supervisory and visualization layer only.
+
+Authority remains centralized on the robotics control node.
 
 ================================================================
 
