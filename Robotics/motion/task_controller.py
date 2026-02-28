@@ -16,10 +16,17 @@ import robot_config as cfg
 from logger import info, warn
 
 # --- Add perception module ---
-perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
-if perc_path not in sys.path:
-    sys.path.append(perc_path)
-from perception_engine import engine as perc_engine
+PERC_AVAILABLE = False
+perc_engine = None
+try:
+    perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
+    if perc_path not in sys.path:
+        sys.path.append(perc_path)
+    from perception_engine import engine as perc_engine  # type: ignore[reportMissingImports]
+    PERC_AVAILABLE = True
+    info("PERC", "Perception module enabled")
+except Exception as e:
+    warn("PERC", f"Perception module disabled: {e}")
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -262,6 +269,7 @@ def create_pipeline():
 def camera_server(mxid, port, label):
     pipeline = create_pipeline()
     server = None
+    perc_started = False
     try:
         with dai.Device(pipeline, dai.DeviceInfo(mxid)) as device:
             if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
@@ -271,12 +279,21 @@ def camera_server(mxid, port, label):
                     pass
             info("CAM", f"[{label}] Camera Connected.")
             q = device.getOutputQueue("out", maxSize=4, blocking=False)
-            q_raw = device.getOutputQueue("rawL", maxSize=4, blocking=False)
+            q_raw = None
+            if label == "INSPECTOR" and PERC_AVAILABLE:
+                try:
+                    q_raw = device.getOutputQueue("rawL", maxSize=4, blocking=False)
+                except Exception as e:
+                    warn("PERC", f"[{label}] rawL stream unavailable, perception disabled for this run: {e}")
             
             # Start perception worker (e.g., on INSPECTOR feed)
-            if label == "INSPECTOR":
+            if label == "INSPECTOR" and PERC_AVAILABLE and q_raw is not None:
                 # Note: You would normally fetch and provide camera intrinsics here
-                perc_engine.start_worker(q_raw, None)
+                try:
+                    perc_engine.start_worker(q_raw, None)
+                    perc_started = True
+                except Exception as e:
+                    warn("PERC", f"[{label}] Failed to start perception worker: {e}")
 
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -322,8 +339,11 @@ def camera_server(mxid, port, label):
         if not STOP_EVENT.is_set():
             warn("CAM", f"[{label}] Error: {e}")
     finally:
-        if label == "INSPECTOR":
-            perc_engine.stop_worker()
+        if perc_started:
+            try:
+                perc_engine.stop_worker()
+            except Exception as e:
+                warn("PERC", f"[{label}] Failed to stop perception worker: {e}")
         if server is not None:
             _close_socket_quietly(server)
             _untrack_server_socket(server)
