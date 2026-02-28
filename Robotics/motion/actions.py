@@ -20,6 +20,7 @@ Design:
 from __future__ import annotations
 
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
@@ -31,6 +32,39 @@ from logger import info, debug, warn
 
 
 cfg_pose_type = tuple[float, float, float, float, float, float]
+
+
+class PickPoseProvider(ABC):
+    @abstractmethod
+    def get_pick_pose(self, side: str, level: int) -> tuple[Optional[cfg_pose_type], str]:
+        """Return (pose, reason). pose=None means unavailable."""
+
+
+class DeterministicPickPoseProvider(PickPoseProvider):
+    def get_pick_pose(self, side: str, level: int) -> tuple[Optional[cfg_pose_type], str]:
+        if side == "L":
+            return cfg.left_pick_pose(level), "ok"
+        if side == "R":
+            return cfg.right_pick_pose(level), "ok"
+        return None, f"Unknown pick side '{side}'"
+
+
+class VisionPickPoseProvider(PickPoseProvider):
+    def get_pick_pose(self, side: str, level: int) -> tuple[Optional[cfg_pose_type], str]:
+        return None, "Vision pick pose provider not implemented"
+
+
+class PickPoseUnavailableError(RuntimeError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _active_pick_pose_provider() -> PickPoseProvider:
+    mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower()
+    if mode == "vision":
+        return VisionPickPoseProvider()
+    return DeterministicPickPoseProvider()
 
 
 @dataclass
@@ -287,10 +321,10 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
     robot = handles.robot
     gripper = handles.gripper
 
-    if side == "L":
-        pick_pose = cfg.left_pick_pose(level)
-    else:
-        pick_pose = cfg.right_pick_pose(level)
+    provider = _active_pick_pose_provider()
+    pick_pose, reason = provider.get_pick_pose(side, level)
+    if pick_pose is None:
+        raise PickPoseUnavailableError(reason)
 
     hover_pose = (
         pick_pose[0],

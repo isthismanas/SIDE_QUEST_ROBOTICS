@@ -49,16 +49,16 @@ DASHBOARD_PORT = 29999
 SOCKET_TIMEOUT_S = 5.0
 
 # ----------------------------
-# Speed Profiles (SpeedFactor %)
+# Speed Profiles
 # ----------------------------
 SPEED_TRAVEL = 30        # larger moves (home <-> pick <-> hover)
 SPEED_PRECISION = 15     # nudges + placing (fine motion)
 
-# Combo mode (future): +10–20% travel only
+# Combo mode
 COMBO_SPEED_BONUS = 10 #may be deprecated in favor of manual speed values provided
 COMBO_ENABLED = True
 COMBO_GREEN_PLACEMENTS_TARGET = 3
-MOVEJ_SPEED_NORMAL = 60
+MOVEJ_SPEED_NORMAL = 20
 MOVEJ_SPEED_COMBO = 90
 
 # ----------------------------
@@ -80,6 +80,7 @@ NUDGE_COOLDOWN_S = 0.20   # minimum time between NUDGE commands
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
+PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision"
 PICK_CLEARANCE_MM = 40.0      # height above block before/after pick
 PLACE_CLEARANCE_MM = 40.0     # height above tower during approach
 BLOCK_HEIGHT_MM = 37.0        # physical block height
