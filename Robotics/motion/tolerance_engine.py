@@ -1,18 +1,49 @@
 from __future__ import annotations
 
+import os, sys
 from math import sqrt
 from typing import Tuple
 
 import robot_config as cfg
 
+perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
+if perc_path not in sys.path: sys.path.append(perc_path)
+from perception_engine import engine as perc_engine
 
 Pose = Tuple[float, float, float, float, float, float]
 
 
+def convert_camera_to_robot(cam_x_m: float, cam_y_m: float) -> Tuple[float, float]:
+	"""
+	Translates Optical Camera Space into Dobot Coordinate Space.
+	(Note: This assumes the camera is looking straight down).
+	"""
+	cam_x_mm = cam_x_m * 1000.0
+	cam_y_mm = cam_y_m * 1000.0
+
+	# 2. Enter the offsets you physically measured in Step 3.1
+	OFFSET_X = 150.0 
+	OFFSET_Y = 50.0  
+
+	return (cam_x_mm + OFFSET_X, cam_y_mm + OFFSET_Y)
+
+
 def radial_error_mm(pose: Pose) -> float:
-	x0, y0 = cfg.TOWER_BASE_POSE[0], cfg.TOWER_BASE_POSE[1]
-	x, y = pose[0], pose[1]
-	return sqrt((x - x0) ** 2 + (y - y0) ** 2)
+	# 1. Ask vision system for the live map of the world
+	tracking_state = perc_engine.get_latest_state()
+	base_marker_data = tracking_state.get(0) 
+
+	if base_marker_data is None:
+		# Failsafe: Camera covered? Fallback to static config.
+		print("WARNING: ArUco 0 not visible! Falling back to static config.")
+		x0, y0 = cfg.TOWER_BASE_POSE[0], cfg.TOWER_BASE_POSE[1]
+	else:
+		# 3. Convert Camera meters to Robot Spaces using your offset
+		cam_x_m, cam_y_m = base_marker_data[0], base_marker_data[1]
+		x0, y0 = convert_camera_to_robot(cam_x_m, cam_y_m)
+
+	target_x, target_y = pose[0], pose[1]
+	return sqrt((target_x - x0) ** 2 + (target_y - y0) ** 2)
 
 
 def classify_pose(pose: Pose) -> str:
