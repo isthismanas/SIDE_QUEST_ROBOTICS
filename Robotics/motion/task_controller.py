@@ -224,7 +224,7 @@ _startup_banner()
 
 
 # --- 2. CAMERA PIPELINE ---
-def create_pipeline():
+def create_pipeline(enable_rawL: bool = False):
     pipeline = dai.Pipeline()
 
     monoL = pipeline.create(dai.node.MonoCamera)
@@ -258,16 +258,18 @@ def create_pipeline():
     sync.out.link(xout.input)
 
     # For Python processing (raw left frames)
-    xout_rawL = pipeline.create(dai.node.XLinkOut)
-    xout_rawL.setStreamName("rawL")
-    monoL.out.link(xout_rawL.input)
+    if enable_rawL:
+        xout_rawL = pipeline.create(dai.node.XLinkOut)
+        xout_rawL.setStreamName("rawL")
+        monoL.out.link(xout_rawL.input)
 
     return pipeline
 
 
 # --- 3. HIGHWAY 1: VIDEO SERVER ---
 def camera_server(mxid, port, label):
-    pipeline = create_pipeline()
+    enable_rawL = (label == "INSPECTOR" and PERC_AVAILABLE)
+    pipeline = create_pipeline(enable_rawL=enable_rawL)
     server = None
     perc_started = False
     try:
