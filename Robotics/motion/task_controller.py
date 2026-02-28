@@ -541,7 +541,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         return
 
     # Session participant gate
-    if (participant_name is None or participant_name.strip() == "") and event in {Event.START_STACK, Event.DROP, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW}:
+    if (participant_name is None or participant_name.strip() == "") and event in {Event.START_STACK, Event.VISION_RETRY, Event.DROP, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW}:
         warn(module, f"[GATE] Participant name required. Rejecting: {cmd_str}")
         log_event("EVENT_REJECT_NO_NAME", cmd=cmd_str, source=source)
         return
@@ -555,10 +555,17 @@ def handle_command(cmd_str: str, source: str) -> None:
     # Safety gates BEFORE committing state transition
     # AUTO_RECOVER is exempt: it's the recovery path from FAULT and may be 
     # issued when disarmed, since it's responsible for re-enabling the robot.
-    if event != Event.AUTO_RECOVER and event in {Event.HOME, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW, Event.DROP, Event.START_STACK}:
+    if event != Event.AUTO_RECOVER and event in {Event.HOME, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW, Event.DROP, Event.START_STACK, Event.VISION_RETRY}:
         if not robot_armed:
             warn(module, "[GATE] Robot not armed. Ignoring motion command.")
             return
+
+    def _handle_vision_pick_unavailable(reason: str) -> None:
+        global STATE
+        warn(module, f"[VISION] pick pose unavailable: {reason}")
+        _send_line_to_unity("VISION_STATUS FAIL")
+        STATE = State.WAITING_FOR_REPOSITION
+        info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
 
     if event in {Event.GRIP_OPEN, Event.GRIP_CLOSE, Event.GRIP_TOGGLE}:
         if not gripper_connected:
@@ -606,7 +613,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         finally:
             controller_busy = False
 
-    elif event == Event.START_STACK:
+    elif event in {Event.START_STACK, Event.VISION_RETRY}:
         if controller_busy:
             warn(module, "[GATE] Controller busy.")
             return
@@ -634,7 +641,13 @@ def handle_command(cmd_str: str, source: str) -> None:
             my_token = current_session_token
             side, level = cfg.PICK_SEQUENCE[current_pick_index]
             handles.combo_active = combo_active
-            actions.execute_pick_sequence(handles, side, level)
+            try:
+                actions.execute_pick_sequence(handles, side, level)
+            except actions.PickPoseUnavailableError as e:
+                if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower() == "vision":
+                    _handle_vision_pick_unavailable(e.reason)
+                    return
+                raise
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
             if m in (9, 11):
@@ -872,7 +885,16 @@ def handle_command(cmd_str: str, source: str) -> None:
                         my_token = current_session_token
                         side, level = cfg.PICK_SEQUENCE[current_pick_index]
                         handles.combo_active = combo_active
-                        actions.execute_pick_sequence(handles, side, level)
+                        try:
+                            actions.execute_pick_sequence(handles, side, level)
+                        except actions.PickPoseUnavailableError as e:
+                            if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower() == "vision":
+                                warn(module, f"[VISION] pick pose unavailable: {e.reason}")
+                                _send_line_to_unity("VISION_STATUS FAIL")
+                                STATE = State.WAITING_FOR_REPOSITION
+                                info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
+                                return
+                            raise
                         # Immediate RobotMode check after motion (auto-continue)
                         m = handles.robot.robot_mode()
                         if m in (9, 11):

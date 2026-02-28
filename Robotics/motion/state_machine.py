@@ -25,6 +25,7 @@ class State(Enum):
     MOVING_TO_PICK = auto()
     MOVING_TO_TOWER_HOVER = auto()
     WAITING_FOR_DECISION = auto()
+    WAITING_FOR_REPOSITION = auto()
     NUDGE = auto()
     PLACING = auto()
     FAULT = auto()
@@ -38,6 +39,7 @@ class Event(Enum):
     # Supervisor intents
     HOME = auto()
     START_STACK = auto()
+    VISION_RETRY = auto()
     FIX = auto()
     DROP = auto()
     CANCEL = auto()
@@ -74,6 +76,7 @@ class TransitionResult:
 _TRANSITIONS: Dict[Tuple[State, Event], State] = {
     # Start stacking
     (State.IDLE, Event.START_STACK): State.MOVING_TO_PICK,
+    (State.WAITING_FOR_REPOSITION, Event.VISION_RETRY): State.MOVING_TO_PICK,
 
     # After pick sequence completes
     (State.MOVING_TO_PICK, Event.PICK_COMPLETE): State.MOVING_TO_TOWER_HOVER,
@@ -98,6 +101,7 @@ _TRANSITIONS: Dict[Tuple[State, Event], State] = {
     (State.NUDGE, Event.HOME): State.IDLE,
     (State.MOVING_TO_PICK, Event.HOME): State.IDLE,
     (State.MOVING_TO_TOWER_HOVER, Event.HOME): State.IDLE,
+    (State.WAITING_FOR_REPOSITION, Event.HOME): State.IDLE,
     (State.PLACING, Event.HOME): State.IDLE,
 
     # Fault handling
@@ -107,6 +111,7 @@ _TRANSITIONS: Dict[Tuple[State, Event], State] = {
     (State.PLACING, Event.FAULT): State.FAULT,
     (State.MOVING_TO_PICK, Event.FAULT): State.FAULT,
     (State.MOVING_TO_TOWER_HOVER, Event.FAULT): State.FAULT,
+    (State.WAITING_FOR_REPOSITION, Event.FAULT): State.FAULT,
     (State.FAULT, Event.CLEAR_FAULT): State.IDLE,
     (State.FAULT, Event.AUTO_RECOVER): State.IDLE,
     (State.FAULT, Event.HOME): State.IDLE,
@@ -212,6 +217,9 @@ def parse_event(cmd: str) -> Tuple[Event, dict]:
 
     if head == "START":
         return Event.START_STACK, {}
+
+    if head == "VISION_RETRY":
+        return Event.VISION_RETRY, {}
 
     if head == "AUTO_RECOVER":
         return Event.AUTO_RECOVER, None
