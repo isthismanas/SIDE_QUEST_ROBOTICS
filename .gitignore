@@ -49,4 +49,6 @@ __pycache__/
 *.pyc
 logs/
 Side Quest for ARC 2026 - The leaning tower of Regolith_v4.docx
-SideQuestXR_Unity
+SideQuestXR_Unity/
+SideQuestRobotics/
+local_project_docs/
