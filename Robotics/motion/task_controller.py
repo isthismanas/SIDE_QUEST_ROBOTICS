@@ -16,17 +16,22 @@ import robot_config as cfg
 from logger import info, warn
 
 # --- Add perception module ---
+PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+VISION_MODE_ENABLED = PICK_POSE_MODE in {"vision", "perception"}
 PERC_AVAILABLE = False
 perc_engine = None
-try:
-    perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
-    if perc_path not in sys.path:
-        sys.path.append(perc_path)
-    from perception_engine import engine as perc_engine  # type: ignore[reportMissingImports]
-    PERC_AVAILABLE = True
-    info("PERC", "Perception module enabled")
-except Exception as e:
-    warn("PERC", f"Perception module disabled: {e}")
+if not VISION_MODE_ENABLED:
+    info("PERC", "PERC bypassed (deterministic mode)")
+else:
+    try:
+        perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
+        if perc_path not in sys.path:
+            sys.path.append(perc_path)
+        from perception_engine import engine as perc_engine  # type: ignore[reportMissingImports]
+        PERC_AVAILABLE = True
+        info("PERC", "Perception module enabled")
+    except Exception as e:
+        warn("PERC", f"Perception module disabled: {e}")
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -268,7 +273,7 @@ def create_pipeline(enable_rawL: bool = False):
 
 # --- 3. HIGHWAY 1: VIDEO SERVER ---
 def camera_server(mxid, port, label):
-    enable_rawL = (label == "INSPECTOR" and PERC_AVAILABLE)
+    enable_rawL = (label == "INSPECTOR" and VISION_MODE_ENABLED and PERC_AVAILABLE)
     pipeline = create_pipeline(enable_rawL=enable_rawL)
     server = None
     perc_started = False
@@ -282,14 +287,14 @@ def camera_server(mxid, port, label):
             info("CAM", f"[{label}] Camera Connected.")
             q = device.getOutputQueue("out", maxSize=4, blocking=False)
             q_raw = None
-            if label == "INSPECTOR" and PERC_AVAILABLE:
+            if enable_rawL:
                 try:
                     q_raw = device.getOutputQueue("rawL", maxSize=4, blocking=False)
                 except Exception as e:
                     warn("PERC", f"[{label}] rawL stream unavailable, perception disabled for this run: {e}")
             
             # Start perception worker (e.g., on INSPECTOR feed)
-            if label == "INSPECTOR" and PERC_AVAILABLE and q_raw is not None:
+            if enable_rawL and q_raw is not None:
                 # Note: You would normally fetch and provide camera intrinsics here
                 try:
                     perc_engine.start_worker(q_raw, None)
