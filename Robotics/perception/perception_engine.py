@@ -1,7 +1,7 @@
 import threading
 import time
 import cv2
-from .aruco_tracker import ArucoTracker
+from aruco_tracker import ArucoTracker
 from logger import info, warn
 
 class PerceptionEngine:
