@@ -275,7 +275,14 @@ def camera_server(mxid, port, label):
             
             # Start perception worker (e.g., on INSPECTOR feed)
             if label == "INSPECTOR":
-                # Note: You would normally fetch and provide camera intrinsics here
+                info("VISION", "Extracting Factory Lens Calibration from OAK-D EEPROM...")
+                calibData = device.readCalibration()
+                
+                import numpy as np
+                camera_matrix = np.array(calibData.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720))
+                dist_coeffs = np.array(calibData.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B))
+                
+                perc_engine.update_intrinsics(camera_matrix, dist_coeffs)
                 perc_engine.start_worker(q_raw, None)
 
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
