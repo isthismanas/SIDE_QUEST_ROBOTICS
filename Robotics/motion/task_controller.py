@@ -275,7 +275,22 @@ def camera_server(mxid, port, label):
             
             # Start perception worker (e.g., on INSPECTOR feed)
             if label == "INSPECTOR":
-                # Note: You would normally fetch and provide camera intrinsics here
+                import numpy as np
+                info("VISION", "Extracting Factory Lens Calibration from OAK-D...")
+                
+                # 1. Request the onboard EEPROM calibration dataset from the device
+                calibData = device.readCalibration()
+                
+                # 2. Extract the 3x3 Intrinsic Matrix for the Left Mono Camera (CAM_B)
+                camera_matrix = np.array(calibData.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720))
+                
+                # 3. Extract the 14x1 Distortion Coefficients array
+                dist_coeffs = np.array(calibData.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B))
+                
+                # 4. Feed the perfect math into the engine
+                perc_engine.update_intrinsics(camera_matrix, dist_coeffs)
+
+                # 5. Start the background thread utilizing the raw camera frames
                 perc_engine.start_worker(q_raw, None)
 
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
