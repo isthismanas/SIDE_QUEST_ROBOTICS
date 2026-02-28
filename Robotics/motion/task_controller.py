@@ -15,6 +15,12 @@ from dh_gripper import DHGripperPGE  # NEW: RS485 Modbus gripper driver
 import robot_config as cfg
 from logger import info, warn
 
+# --- Add perception module ---
+perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
+if perc_path not in sys.path:
+    sys.path.append(perc_path)
+from perception_engine import engine as perc_engine
+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 info("CONTROL", f"USING ACTIONS FROM: {actions.__file__}")
@@ -244,6 +250,11 @@ def create_pipeline():
     xout.setStreamName("out")
     sync.out.link(xout.input)
 
+    # For Python processing (raw left frames)
+    xout_rawL = pipeline.create(dai.node.XLinkOut)
+    xout_rawL.setStreamName("rawL")
+    monoL.out.link(xout_rawL.input)
+
     return pipeline
 
 
@@ -260,6 +271,12 @@ def camera_server(mxid, port, label):
                     pass
             info("CAM", f"[{label}] Camera Connected.")
             q = device.getOutputQueue("out", maxSize=4, blocking=False)
+            q_raw = device.getOutputQueue("rawL", maxSize=4, blocking=False)
+            
+            # Start perception worker (e.g., on INSPECTOR feed)
+            if label == "INSPECTOR":
+                # Note: You would normally fetch and provide camera intrinsics here
+                perc_engine.start_worker(q_raw, None)
 
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -305,6 +322,8 @@ def camera_server(mxid, port, label):
         if not STOP_EVENT.is_set():
             warn("CAM", f"[{label}] Error: {e}")
     finally:
+        if label == "INSPECTOR":
+            perc_engine.stop_worker()
         if server is not None:
             _close_socket_quietly(server)
             _untrack_server_socket(server)
