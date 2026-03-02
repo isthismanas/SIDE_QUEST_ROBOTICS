@@ -231,9 +231,66 @@ Authority remains centralized on the robotics control node.
 
 ================================================================
 
+10. Leaderboard & Competition Infrastructure (Dev18)
+
+http://192.168.5.10:8090/
+
+### A) Architecture Decision
+
+- Leaderboard authority is on the Raspberry Pi Task Controller, not Unity.
+- Unity remains visualization/supervisory only and does not compute rankings.
+- Run finalization happens in controller flow via `finalize_run()` at terminal outcomes.
+
+### B) Data Model
+
+Each finalized leaderboard record includes:
+
+- `run_id`
+- `session_id`
+- `participant_name`
+- `final_height` (bounded by tower target, max 7 in current configuration)
+- `completion_time_s`
+- `end_state` (`COMPLETE`, `TUMBLE`, `FAULT`, `CANCEL`)
+- `mode` (`DEV` or `OFFICIAL`)
+- `event_id`
+
+### C) Persistence
+
+- Leaderboard mode/event configuration is persisted at:
+  - `logs/leaderboard_mode.json`
+- Leaderboard records are persisted to mode-scoped JSONL:
+  - `logs/dev/leaderboard.jsonl`
+  - `logs/official/leaderboard.jsonl`
+- Session event JSONL is OFFICIAL-only and written under:
+  - `logs/official/session_<id>.jsonl`
+
+### D) Mode System
+
+Live control commands:
+
+- `MODE DEV`
+- `MODE OFFICIAL`
+- `MODE SHOW`
+- `EVENT <event_id>`
+
+Operational behavior:
+
+- Mode and event ID persist across restarts through `leaderboard_mode.json`.
+- Mode switch changes record tagging and default leaderboard view; it does not rewrite historical JSONL.
+
+### E) HTTP API (Port 8090)
+
+- `GET /leaderboard`
+  - Query params:
+    - `mode`
+    - `event_id`
+    - `limit`
+- `GET /` serves kiosk HTML from the controller process.
+- `GET /assets/<file>` serves static kiosk assets (e.g., logos).
+
+================================================================
+
 cd ~/SIDE_QUEST_ROBOTICS/Robotics/motion
 ./run_controller.sh
 
 ================================================================
-leaderboard
-http://192.168.5.10:8090/
