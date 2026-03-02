@@ -233,3 +233,7 @@ Authority remains centralized on the robotics control node.
 
 cd ~/SIDE_QUEST_ROBOTICS/Robotics/motion
 ./run_controller.sh
+
+================================================================
+leaderboard
+http://192.168.5.10:8090/
