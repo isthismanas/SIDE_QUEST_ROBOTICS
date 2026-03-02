@@ -81,6 +81,7 @@ NUDGE_COOLDOWN_S = 0.20   # minimum time between NUDGE commands
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
 PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision"
+CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
 PICK_CLEARANCE_MM = 40.0      # height above block before/after pick
 PLACE_CLEARANCE_MM = 40.0     # height above tower during approach
 BLOCK_HEIGHT_MM = 37.0        # physical block height
