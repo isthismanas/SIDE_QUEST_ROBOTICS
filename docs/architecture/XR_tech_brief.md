@@ -114,6 +114,29 @@ Unity updates visual indicator
 
 Video stream remains fully isolated from control channel.
 
+### Dev Update – Decision Token Protocol (Dev XX)
+
+Purpose: prevent stale/queued XR decisions across blocks.
+
+Protocol:
+- Python emits `DECISION_READY <token>` at hover.
+- Unity sends `DROP <token>` and `FIX <token>`.
+
+Validation:
+- Commands are valid only for the current decision window (`WAITING_FOR_DECISION`).
+- Missing/invalid token → reject.
+- Stale token (e.g., got 1, expected 2) → reject.
+
+UI behavior:
+- Decision window: FIX + DROP enabled.
+- Fix mode (NUDGE): DROP + NUDGE enabled, FIX disabled.
+- Robot busy: decision buttons disabled.
+
+Result:
+- One valid decision per block.
+- No queued stale XR commands.
+- XR UI stays in sync with backend state.
+
 ================================================================
 
 6. Operator Interface Design (Dev 12)
