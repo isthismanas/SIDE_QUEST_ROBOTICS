@@ -421,26 +421,26 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             margin-right: calc(50% - 50vw);
             background: linear-gradient(180deg, #16243f 0%, #0f1420 100%);
             border-bottom: 1px solid #253047;
-            padding: 18px 0;
+            padding: 72px 0;
             margin-bottom: 4px;
         }
         .logo-wrap {
             display: flex;
             justify-content: center;
             align-items: center;
-            gap: 28px;
+            gap: 50px;
             margin: 0;
             padding: 0;
         }
         .logo {
-            height: 110px;
+            height: 200px;
             max-width: 26%;
             object-fit: contain;
         }
         h1 {
-            margin: 2px 0;
+            margin: 6px 0 2px 0;
             letter-spacing: 1px;
-            font-size: clamp(24px, 4vw, 42px);
+            font-size: clamp(36px, 6vw, 63px);
             text-transform: uppercase;
             text-align: center;
             font-family: Futura, "Futura PT", "Trebuchet MS", Inter, sans-serif;
@@ -453,8 +453,7 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             color: var(--muted);
             font-weight: 500;
             flex-wrap: wrap;
-            margin-bottom: 0;
-            margin-top: 0;
+            margin: 26px 0 0 0;
             font-size: clamp(12px, 1.1vw, 14px);
             opacity: 0.8;
         }
@@ -511,10 +510,6 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             </div>
         </div>
         <h1>SIDE QUEST LEADERBOARD</h1>
-        <div class=\"meta\">
-            <div id=\"mode\">Mode: --</div>
-            <div id=\"event\">Event: --</div>
-        </div>
         <div class=\"panel\">
             <table>
                 <thead>
@@ -527,6 +522,10 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
                 </thead>
                 <tbody id=\"rows\"></tbody>
             </table>
+        </div>
+        <div class=\"meta\">
+            <div id=\"mode\">Mode: --</div>
+            <div id=\"event\">Event: --</div>
         </div>
         <div class=\"status\" id=\"status\">Waiting for data…</div>
     </div>
