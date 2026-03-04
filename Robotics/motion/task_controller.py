@@ -103,6 +103,8 @@ session_id = None
 tower_attempt_start_ts = None
 run_start_time = None
 block_attempt_start_ts = None
+drop_committed_this_window = False
+decision_seq = 0
 holding_block = False
 current_session_token = uuid4()
 proposed_place_pose = None
@@ -895,6 +897,14 @@ def _send_line_to_unity(line: str) -> bool:
         return False
 
 
+def send_ack(cmd: str) -> bool:
+    return _send_line_to_unity(f"ACK {cmd}")
+
+
+def send_nack(cmd: str, reason: str) -> bool:
+    return _send_line_to_unity(f"NACK {cmd} {reason}")
+
+
 def _push_zone_if_needed(force: bool = False) -> None:
     global _last_sent_zone
     if _unity_command_conn is None:
@@ -908,7 +918,7 @@ def _push_zone_if_needed(force: bool = False) -> None:
 
 def _handle_post_tower_hover(module: str, my_token) -> bool:
     """Handle post-hover fault check and AT_TOWER_HOVER transition in one place."""
-    global STATE, block_attempt_start_ts, proposed_place_pose, proposed_place_stack_level
+    global STATE, block_attempt_start_ts, drop_committed_this_window, decision_seq, proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level
 
     m = handles.robot.robot_mode()
@@ -929,6 +939,9 @@ def _handle_post_tower_hover(module: str, my_token) -> bool:
         STATE = result.next_state
         info(module, f"[SM] -> {STATE.name} (AT_TOWER_HOVER)")
         if STATE == State.WAITING_FOR_DECISION:
+            drop_committed_this_window = False
+            decision_seq += 1
+            _send_line_to_unity(f"DECISION_READY {decision_seq}")
             if current_stack_level is not None and current_stack_level >= 0:
                 base_place = cfg.tower_place_pose(current_stack_level)
                 proposed_place_pose = drift_engine.inject_drift(base_place, current_stack_level)
@@ -965,7 +978,7 @@ def handle_command(cmd_str: str, source: str) -> None:
     """
     global STATE, robot_armed, gripper_connected, controller_busy
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
-    global participant_name, session_id, tower_attempt_start_ts, run_start_time, block_attempt_start_ts, holding_block, current_session_token
+    global participant_name, session_id, tower_attempt_start_ts, run_start_time, block_attempt_start_ts, drop_committed_this_window, decision_seq, holding_block, current_session_token
     global proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active
     global run_id, run_finalized
@@ -995,6 +1008,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         tower_attempt_start_ts = None
         run_start_time = None
         block_attempt_start_ts = None
+        drop_committed_this_window = False
         holding_block = False
         controller_busy = False
         current_session_token = uuid4()
@@ -1007,6 +1021,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         handles.combo_active = combo_active
         run_id = None
         run_finalized = False
+        _send_line_to_unity("NAME_SET")
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
         info("CONTROL", f"Participant set: {participant_name}. Ready to START.")
         return
@@ -1030,6 +1045,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         blocks_placed = current_stack_level
         run_time_s = emit_run_summary("TUMBLE")
         finalize_run("TUMBLE")
+        _send_line_to_unity("RUN_FAIL TUMBLE")
 
         log_event(
             "EVENT_RUN_SUMMARY",
@@ -1064,6 +1080,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         tower_attempt_start_ts = None
         run_start_time = None
         block_attempt_start_ts = None
+        drop_committed_this_window = False
         proposed_place_pose = None
         proposed_place_stack_level = None
         current_zone = "GREEN"
@@ -1112,6 +1129,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             STATE = State.IDLE
             current_pick_index = 0
             current_stack_level = 0
+            drop_committed_this_window = False
             proposed_place_pose = None
             proposed_place_stack_level = None
             current_zone = "GREEN"
@@ -1127,16 +1145,90 @@ def handle_command(cmd_str: str, source: str) -> None:
         warn(module, f"[CMD] Reject: {e}")
         return
 
+    drop_token = None
+    fix_token = None
+    if event == Event.DROP:
+        parts = cmd_str.strip().split()
+        if len(parts) < 2:
+            send_nack("DROP", "BAD_FORMAT")
+            info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP missing decision token")
+            return
+        try:
+            drop_token = int(parts[1])
+        except ValueError:
+            send_nack("DROP", "BAD_FORMAT")
+            info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP invalid decision token")
+            return
+
+    if event == Event.FIX:
+        parts = cmd_str.strip().split()
+        if len(parts) < 2:
+            info(module, "[FIX][PY] send NACK FIX reason=BAD_FORMAT")
+            send_nack("FIX", "BAD_FORMAT")
+            info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=FIX missing decision token")
+            return
+        try:
+            fix_token = int(parts[1])
+        except ValueError:
+            info(module, "[FIX][PY] send NACK FIX reason=BAD_FORMAT")
+            send_nack("FIX", "BAD_FORMAT")
+            info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=FIX invalid decision token")
+            return
+
+    if event == Event.FIX:
+        info(module, f"[FIX][PY] recv FIX (STATE={STATE.name})")
+
     # Session participant gate
     if (participant_name is None or participant_name.strip() == "") and event in {Event.START_STACK, Event.VISION_RETRY, Event.DROP, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW}:
         warn(module, f"[GATE] Participant name required. Rejecting: {cmd_str}")
+        if event == Event.START_STACK:
+            send_nack("START", "NO_NAME")
+        if event == Event.DROP:
+            send_nack("DROP", "NO_NAME")
+        if event == Event.FIX:
+            info(module, "[FIX][PY] send NACK FIX reason=NO_NAME")
+            send_nack("FIX", "NO_NAME")
         log_event("EVENT_REJECT_NO_NAME", cmd=cmd_str, source=source)
+        return
+
+    if event == Event.FIX and STATE != State.WAITING_FOR_DECISION:
+        info(module, "[FIX][PY] send NACK FIX reason=BAD_STATE")
+        send_nack("FIX", "BAD_STATE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=FIX requires WAITING_FOR_DECISION")
+        return
+
+    if event == Event.FIX and fix_token != decision_seq:
+        info(module, "[FIX][PY] send NACK FIX reason=STALE")
+        send_nack("FIX", "STALE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=FIX stale token (got={fix_token}, expected={decision_seq})")
         return
 
     # Gate transition using state machine
     result = step(STATE, event)
     if not result.allowed:
+        if event == Event.START_STACK:
+            send_nack("START", "BAD_STATE")
+        if event == Event.DROP:
+            send_nack("DROP", "BAD_STATE")
+        if event == Event.FIX:
+            info(module, "[FIX][PY] send NACK FIX reason=BAD_STATE")
+            send_nack("FIX", "BAD_STATE")
         info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason={result.reason}")
+        return
+
+    if event == Event.DROP and STATE not in {State.WAITING_FOR_DECISION, State.NUDGE}:
+        send_nack("DROP", "BAD_STATE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP requires WAITING_FOR_DECISION or NUDGE")
+        return
+
+    if event == Event.DROP and drop_token != decision_seq:
+        send_nack("DROP", "STALE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP stale token (got={drop_token}, expected={decision_seq})")
+        return
+
+    if event == Event.DROP and STATE in {State.WAITING_FOR_DECISION, State.NUDGE} and drop_committed_this_window:
+        send_nack("DROP", "DUPLICATE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP duplicate (latch={drop_committed_this_window})")
         return
 
     # Safety gates BEFORE committing state transition
@@ -1144,6 +1236,13 @@ def handle_command(cmd_str: str, source: str) -> None:
     # issued when disarmed, since it's responsible for re-enabling the robot.
     if event != Event.AUTO_RECOVER and event in {Event.HOME, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW, Event.DROP, Event.START_STACK, Event.VISION_RETRY}:
         if not robot_armed:
+            if event == Event.START_STACK:
+                send_nack("START", "NOT_ARMED")
+            if event == Event.DROP:
+                send_nack("DROP", "NOT_ARMED")
+            if event == Event.FIX:
+                info(module, "[FIX][PY] send NACK FIX reason=NOT_ARMED")
+                send_nack("FIX", "NOT_ARMED")
             warn(module, "[GATE] Robot not armed. Ignoring motion command.")
             return
 
@@ -1202,16 +1301,22 @@ def handle_command(cmd_str: str, source: str) -> None:
 
     elif event in {Event.START_STACK, Event.VISION_RETRY}:
         if controller_busy:
+            if event == Event.START_STACK:
+                send_nack("START", "BUSY")
             warn(module, "[GATE] Controller busy.")
             return
         controller_busy = True
         try:
             # Bounds checking
             if current_pick_index >= len(cfg.PICK_SEQUENCE):
+                if event == Event.START_STACK:
+                    send_nack("START", "BAD_STATE")
                 warn(module, "[STACK] No more blocks in PICK_SEQUENCE. Ignoring START.")
                 return
 
             if current_stack_level >= 7:
+                if event == Event.START_STACK:
+                    send_nack("START", "BAD_STATE")
                 warn(module, "[STACK] Tower full. Ignoring START.")
                 return
 
@@ -1225,6 +1330,9 @@ def handle_command(cmd_str: str, source: str) -> None:
                 green_place_streak = 0
                 combo_active = False
                 handles.combo_active = combo_active
+
+            if event == Event.START_STACK:
+                send_ack("START")
 
             # Execute pick sequence
             my_token = current_session_token
@@ -1266,6 +1374,8 @@ def handle_command(cmd_str: str, source: str) -> None:
 
     elif event == Event.FIX:
         # no motion yet; just entering NUDGE
+        info(module, "[FIX][PY] send ACK FIX")
+        send_ack("FIX")
         pass
 
     elif event == Event.NUDGE_XY:
@@ -1354,10 +1464,13 @@ def handle_command(cmd_str: str, source: str) -> None:
         block_attempt_start_ts = None
 
         if controller_busy:
+            send_nack("DROP", "BUSY")
             warn(module, "[GATE] Controller busy.")
             return
+        drop_committed_this_window = True
         controller_busy = True
         try:
+            send_ack("DROP")
             my_token = current_session_token
             zone_at_commit = "UNKNOWN"
             # Attempt placement with error handling
@@ -1462,6 +1575,17 @@ def handle_command(cmd_str: str, source: str) -> None:
                     _send_line_to_unity(f"RUN_COMPLETE {current_stack_level}")
                     time.sleep(5.0)
                     info(module, "[STACK] COMPLETE summary emitted (post-wait)")
+
+                    current_pick_index = 0
+                    current_stack_level = 0
+                    holding_block = False
+                    proposed_place_pose = None
+                    proposed_place_stack_level = None
+                    block_attempt_start_ts = None
+                    drop_committed_this_window = False
+                    tower_attempt_start_ts = None
+                    run_start_time = None
+                    participant_name = None
                     return
 
                 # Auto-continue stacking if enabled and targets remain

@@ -25,6 +25,10 @@ public class RobotCommandPipe : MonoBehaviour
     [Header("Debug")]
     public bool logCommands = false;
 
+    [Header("UI State")]
+    [Tooltip("Optional link to XRUIStateManager for START ACK/NACK gating.")]
+    public XRUIStateManager uiStateManager;
+
     [Header("Zone Status (from Pi)")]
     [Tooltip("Latest zone received from Pi (ZONE GREEN/YELLOW/RED).")]
     public string currentZone = "GREEN";
@@ -50,6 +54,7 @@ public class RobotCommandPipe : MonoBehaviour
     // --- Nudge anti-spam / hold-to-repeat ---
     private Coroutine _nudgeRoutine = null;
     private float _lastNudgeTime = -999f;
+    private int _latestDecisionSeq = -1;
 
     void Start()
     {
@@ -195,6 +200,85 @@ public class RobotCommandPipe : MonoBehaviour
             return;
         }
 
+        if (line.Equals("RUN_COMPLETE", StringComparison.OrdinalIgnoreCase) ||
+            line.StartsWith("RUN_COMPLETE ", StringComparison.OrdinalIgnoreCase))
+        {
+            uiStateManager?.ResetToBoot();
+            return;
+        }
+
+        if (line.Equals("RUN_FAIL TUMBLE", StringComparison.OrdinalIgnoreCase))
+        {
+            uiStateManager?.ResetToBoot();
+            return;
+        }
+
+        if (line.Equals("NAME_SET", StringComparison.OrdinalIgnoreCase) ||
+            line.StartsWith("NAME_SET ", StringComparison.OrdinalIgnoreCase))
+        {
+            uiStateManager?.OnNameSet();
+            return;
+        }
+
+        if (line.StartsWith("DECISION_READY ", StringComparison.OrdinalIgnoreCase))
+        {
+            string raw = line.Substring("DECISION_READY ".Length).Trim();
+            if (int.TryParse(raw, out int seq))
+            {
+                _latestDecisionSeq = seq;
+                Debug.Log($"[Pipe] DECISION_READY {_latestDecisionSeq}");
+                uiStateManager?.OnDecisionReady(_latestDecisionSeq);
+                if (logCommands)
+                    Debug.Log("[RobotCommandPipe] Decision ready: " + _latestDecisionSeq);
+            }
+            return;
+        }
+
+        if (line.StartsWith("ACK ", StringComparison.OrdinalIgnoreCase))
+        {
+            string cmd = line.Substring(4).Trim().ToUpperInvariant();
+            if (cmd == "START")
+            {
+                uiStateManager?.OnStartAck();
+            }
+            else if (cmd == "DROP")
+            {
+                uiStateManager?.OnDropAck();
+            }
+            else if (cmd == "FIX")
+            {
+                Debug.Log($"[FIX][PIPE] recv ACK FIX token={_latestDecisionSeq} id={GetInstanceID()} line='{line}'");
+                uiStateManager?.OnFixAck();
+            }
+            return;
+        }
+
+        if (line.StartsWith("NACK ", StringComparison.OrdinalIgnoreCase))
+        {
+            string rest = line.Substring(5).Trim();
+            if (rest.Length == 0)
+                return;
+
+            string[] parts = rest.Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+            string cmd = parts[0].ToUpperInvariant();
+            string reason = (parts.Length > 1 ? parts[1] : "UNKNOWN").Trim().ToUpperInvariant();
+
+            if (cmd == "START")
+            {
+                uiStateManager?.OnStartNack(reason);
+            }
+            else if (cmd == "DROP")
+            {
+                uiStateManager?.OnDropNack(reason);
+            }
+            else if (cmd == "FIX")
+            {
+                Debug.Log($"[FIX][PIPE] recv NACK FIX token={_latestDecisionSeq} id={GetInstanceID()} reason='{reason}' line='{line}'");
+                uiStateManager?.OnFixNack(reason);
+            }
+            return;
+        }
+
 
         // Optional: log other inbound messages only if debug enabled
         if (logCommands)
@@ -205,10 +289,21 @@ public class RobotCommandPipe : MonoBehaviour
     // =========================
     // High-Level Commands
     // =========================
+    public bool HasDecisionToken() => _latestDecisionSeq >= 0;
     public void SendStart() => SendAction("START");
-    public void SendCommit() => SendAction("COMMIT");  // server maps COMMIT->DROP
-    public void SendDrop() => SendAction("DROP");
-    public void SendFix() => SendAction("FIX");
+    public void SendCommit() => SendAction($"COMMIT {_latestDecisionSeq}");  // server maps COMMIT->DROP
+    public void SendDrop() => SendAction($"DROP {_latestDecisionSeq}");
+    public void SendFix()
+    {
+        if (_latestDecisionSeq < 0)
+        {
+            Debug.LogWarning($"[FIX][PIPE] SendFix() blocked: no decision seq (id={GetInstanceID()})");
+            return;
+        }
+        bool socketOk = stream != null && stream.CanWrite;
+        Debug.Log($"[FIX][PIPE] SendFix() token={_latestDecisionSeq} id={GetInstanceID()} socketOk={socketOk} connected={_isConnectingOrConnected}");
+        SendAction($"FIX {_latestDecisionSeq}");
+    }
     public void SendCancel() => SendAction("CANCEL");
     public void SendHome() => SendAction("HOME");
 
