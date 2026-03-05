@@ -6,9 +6,18 @@ from typing import Tuple
 
 import robot_config as cfg
 
-perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
-if perc_path not in sys.path: sys.path.append(perc_path)
-from perception_engine import engine as perc_engine
+PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+VISION_MODE_ENABLED = PICK_POSE_MODE in {"vision", "perception"}
+
+perc_engine = None
+if VISION_MODE_ENABLED:
+	try:
+		perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
+		if perc_path not in sys.path:
+			sys.path.append(perc_path)
+		from perception_engine import engine as perc_engine
+	except Exception:
+		perc_engine = None
 
 Pose = Tuple[float, float, float, float, float, float]
 
@@ -29,18 +38,16 @@ def convert_camera_to_robot(cam_x_m: float, cam_y_m: float) -> Tuple[float, floa
 
 
 def radial_error_mm(pose: Pose) -> float:
-	# 1. Ask vision system for the live map of the world
-	tracking_state = perc_engine.get_latest_state()
-	base_marker_data = tracking_state.get(0) 
-
-	if base_marker_data is None:
-		# Failsafe: Camera covered? Fallback to static config.
-		print("WARNING: ArUco 0 not visible! Falling back to static config.")
+	if (not VISION_MODE_ENABLED) or (perc_engine is None):
 		x0, y0 = cfg.TOWER_BASE_POSE[0], cfg.TOWER_BASE_POSE[1]
 	else:
-		# 3. Convert Camera meters to Robot Spaces using your offset
-		cam_x_m, cam_y_m = base_marker_data[0], base_marker_data[1]
-		x0, y0 = convert_camera_to_robot(cam_x_m, cam_y_m)
+		tracking_state = perc_engine.get_latest_state()
+		base_marker_data = tracking_state.get(0)
+		if base_marker_data is None:
+			x0, y0 = cfg.TOWER_BASE_POSE[0], cfg.TOWER_BASE_POSE[1]
+		else:
+			cam_x_m, cam_y_m = base_marker_data[0], base_marker_data[1]
+			x0, y0 = convert_camera_to_robot(cam_x_m, cam_y_m)
 
 	target_x, target_y = pose[0], pose[1]
 	return sqrt((target_x - x0) ** 2 + (target_y - y0) ** 2)

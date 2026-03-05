@@ -1,9 +1,10 @@
 import time, socket, struct, os, threading, json, sys
 import warnings
-import depthai as dai
 from datetime import timedelta
 import hashlib
 from uuid import uuid4
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 from state_machine import State, Event, step, parse_event
 
 import actions
@@ -18,6 +19,15 @@ from logger import info, warn
 # --- Add perception module ---
 PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
 VISION_MODE_ENABLED = PICK_POSE_MODE in {"vision", "perception"}
+CAMERA_STREAM_ENABLED = bool(getattr(cfg, "CAMERA_STREAM_ENABLED", True))
+
+dai = None
+if VISION_MODE_ENABLED or CAMERA_STREAM_ENABLED:
+    try:
+        import depthai as dai
+    except Exception:
+        dai = None
+
 PERC_AVAILABLE = False
 perc_engine = None
 if not VISION_MODE_ENABLED:
@@ -93,6 +103,8 @@ session_id = None
 tower_attempt_start_ts = None
 run_start_time = None
 block_attempt_start_ts = None
+drop_committed_this_window = False
+decision_seq = 0
 holding_block = False
 current_session_token = uuid4()
 proposed_place_pose = None
@@ -103,6 +115,12 @@ green_place_streak = 0
 combo_active = False
 _unity_command_conn = None
 _last_sent_zone = None
+run_id = None
+run_finalized = False
+LEADERBOARD_MODE = "DEV"
+OFFICIAL_EVENT_ID = "ARC2026"
+
+LEADERBOARD_PORT = 8090
 
 
 def _track_server_socket(sock: socket.socket) -> None:
@@ -173,9 +191,11 @@ def _join_worker_threads(timeout_s: float = 1.0) -> list[str]:
 
 def log_event(event: str, **fields) -> None:
     """Append one JSONL event record to cfg.LOG_DIR."""
+    if _normalize_leaderboard_mode(LEADERBOARD_MODE) != "OFFICIAL":
+        return
+
     try:
-        log_dir = getattr(cfg, "LOG_DIR", "logs")
-        os.makedirs(log_dir, exist_ok=True)
+        log_dir = _current_log_subdir()
 
         sid = session_id or "no_session"
         log_path = os.path.join(log_dir, f"session_{sid}.jsonl")
@@ -211,6 +231,475 @@ def emit_run_summary(reason: str) -> float:
     return duration_s
 
 
+def _normalize_leaderboard_mode(value) -> str:
+    return "OFFICIAL" if str(value).strip().upper() == "OFFICIAL" else "DEV"
+
+
+def _current_log_subdir() -> str:
+    mode = _normalize_leaderboard_mode(LEADERBOARD_MODE)
+    base_log_dir = getattr(cfg, "LOG_DIR", "logs")
+    subdir = "official" if mode == "OFFICIAL" else "dev"
+    path = os.path.join(base_log_dir, subdir)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _leaderboard_mode_path() -> str:
+    log_dir = getattr(cfg, "LOG_DIR", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, "leaderboard_mode.json")
+
+
+def _save_leaderboard_mode() -> None:
+    payload = {
+        "mode": LEADERBOARD_MODE,
+        "official_event_id": OFFICIAL_EVENT_ID,
+        "updated_at_unix": time.time(),
+    }
+    path = _leaderboard_mode_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception as e:
+        warn("STACK", f"[LEADERBOARD] Failed to persist mode config: {e}")
+
+
+def _load_leaderboard_mode() -> None:
+    global LEADERBOARD_MODE, OFFICIAL_EVENT_ID
+
+    path = _leaderboard_mode_path()
+    if not os.path.exists(path):
+        _save_leaderboard_mode()
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        warn("STACK", f"[LEADERBOARD] Failed to read mode config, using defaults: {e}")
+        return
+
+    if isinstance(raw, dict):
+        LEADERBOARD_MODE = _normalize_leaderboard_mode(raw.get("mode", LEADERBOARD_MODE))
+        event_value = str(raw.get("official_event_id", OFFICIAL_EVENT_ID)).strip()
+        OFFICIAL_EVENT_ID = event_value if event_value else OFFICIAL_EVENT_ID
+
+    info("STACK", f"[LEADERBOARD] Mode loaded: mode={LEADERBOARD_MODE} event_id={OFFICIAL_EVENT_ID}")
+
+
+def _leaderboard_jsonl_path() -> str:
+    return os.path.join(_current_log_subdir(), "leaderboard.jsonl")
+
+
+def _compute_completion_time_s() -> float:
+    now_mono = time.monotonic()
+    start_ts = run_start_time if run_start_time is not None else now_mono
+    return max(0.0, now_mono - start_ts)
+
+
+def finalize_run(end_state: str) -> None:
+    global run_finalized
+    if run_finalized:
+        return
+
+    ended_state = str(end_state).strip().upper() if isinstance(end_state, str) else "UNKNOWN"
+    target_height = int(getattr(cfg, "TOWER_LEVELS", 7))
+    stable_height = int(globals().get("current_stack_level", 0) or 0)
+    final_height = max(0, min(stable_height, target_height))
+    completion_time_s = _compute_completion_time_s()
+    finalized_run_id = run_id or uuid4().hex
+    mode = _normalize_leaderboard_mode(LEADERBOARD_MODE)
+    event_id = OFFICIAL_EVENT_ID if mode == "OFFICIAL" else "DEV"
+
+    record = {
+        "run_id": finalized_run_id,
+        "session_id": session_id,
+        "participant_name": participant_name,
+        "end_state": ended_state,
+        "mode": mode,
+        "event_id": event_id,
+        "final_height": final_height,
+        "target_height": target_height,
+        "completion_time_s": round(completion_time_s, 3),
+        "ended_at_unix": time.time(),
+    }
+
+    path = _leaderboard_jsonl_path()
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        run_finalized = True
+        info("STACK", f"[LEADERBOARD] Finalized run_id={finalized_run_id} state={ended_state} height={final_height}/{target_height} time={completion_time_s:.3f}s")
+    except Exception as e:
+        warn("STACK", f"[LEADERBOARD] Failed to append leaderboard record: {e}")
+
+
+def _load_leaderboard_records() -> list[dict]:
+    path = _leaderboard_jsonl_path()
+    if not os.path.exists(path):
+        return []
+
+    rows: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        rows.append(row)
+                except Exception:
+                    continue
+    except Exception as e:
+        warn("STACK", f"[LEADERBOARD] Failed to read leaderboard: {e}")
+    return rows
+
+
+class _LeaderboardHandler(BaseHTTPRequestHandler):
+    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, status: int, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _kiosk_html(self) -> str:
+        return """<!doctype html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>SIDE QUEST LEADERBOARD</title>
+    <style>
+        :root {
+            --bg: #07090f;
+            --panel: #0f1420;
+            --line: #253047;
+            --text: #e7edf9;
+            --muted: #9ab0d0;
+            --gold: #f2c94c;
+            --silver: #c0cad6;
+            --bronze: #cd8c5d;
+            --accent: #4db7ff;
+        }
+        * { box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; margin: 0; }
+        body {
+            font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+            background: #00E5FF;
+            color: var(--text);
+            display: flex;
+            align-items: stretch;
+            justify-content: center;
+        }
+        .wrap {
+            width: min(1200px, 100%);
+            padding: 0 16px 14px 16px;
+            display: grid;
+            grid-template-rows: auto auto auto auto;
+            gap: 4px;
+        }
+        .logo-band {
+            width: 100vw;
+            margin-left: calc(50% - 50vw);
+            margin-right: calc(50% - 50vw);
+            background: linear-gradient(180deg, #16243f 0%, #0f1420 100%);
+            border-bottom: 1px solid #253047;
+            padding: 72px 0;
+            margin-bottom: 4px;
+        }
+        .logo-wrap {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 50px;
+            margin: 0;
+            padding: 0;
+        }
+        .logo {
+            height: 200px;
+            max-width: 26%;
+            object-fit: contain;
+        }
+        h1 {
+            margin: 6px 0 2px 0;
+            letter-spacing: 1px;
+            font-size: clamp(36px, 6vw, 63px);
+            text-transform: uppercase;
+            text-align: center;
+            font-family: Futura, "Futura PT", "Trebuchet MS", Inter, sans-serif;
+            color: #0f1420;
+        }
+        .meta {
+            display: flex;
+            justify-content: center;
+            gap: 18px;
+            color: var(--muted);
+            font-weight: 500;
+            flex-wrap: wrap;
+            margin: 26px 0 0 0;
+            font-size: clamp(12px, 1.1vw, 14px);
+            opacity: 0.8;
+        }
+        .panel {
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: color-mix(in oklab, var(--panel) 92%, black);
+            overflow: hidden;
+            min-height: 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: clamp(13px, 1.35vw, 18px);
+            font-family: "Encode Sans", "Encode Sans SemiExpanded", Inter, system-ui, sans-serif;
+        }
+        thead th {
+            text-align: left;
+            color: var(--muted);
+            padding: 9px 12px;
+            border-bottom: 1px solid var(--line);
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            font-size: 0.75em;
+        }
+        tbody td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #1a2233;
+        }
+        tbody tr { height: 42px; }
+        tbody tr:nth-child(1) { background: linear-gradient(90deg, rgba(242,201,76,0.22), transparent 70%); }
+        tbody tr:nth-child(2) { background: linear-gradient(90deg, rgba(192,202,214,0.20), transparent 70%); }
+        tbody tr:nth-child(3) { background: linear-gradient(90deg, rgba(205,140,93,0.20), transparent 70%); }
+        tbody tr:nth-child(1) td:first-child { color: var(--gold); font-weight: 800; }
+        tbody tr:nth-child(2) td:first-child { color: var(--silver); font-weight: 800; }
+        tbody tr:nth-child(3) td:first-child { color: var(--bronze); font-weight: 800; }
+        tbody tr.empty { background: transparent !important; }
+        tbody tr.empty td:first-child { color: var(--text); font-weight: 400; }
+        .status {
+            min-height: 24px;
+            color: var(--accent);
+            text-align: center;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class=\"wrap\">
+        <div class=\"logo-band\">
+            <div class=\"logo-wrap\">
+                <img src=\"/assets/logo1.png\" alt=\"Side Quest Logo\" class=\"logo\">
+                <img src=\"/assets/logo2.png\" alt=\"Side Quest Logo 2\" class=\"logo\">
+                <img src=\"/assets/logo3.png\" alt=\"Side Quest Logo 3\" class=\"logo\">
+            </div>
+        </div>
+        <h1>SIDE QUEST LEADERBOARD</h1>
+        <div class=\"panel\">
+            <table>
+                <thead>
+                    <tr>
+                        <th style=\"width: 14%\">Rank</th>
+                        <th style=\"width: 46%\">Pilot Name</th>
+                        <th style=\"width: 20%\">Height</th>
+                        <th style=\"width: 20%\">Time</th>
+                    </tr>
+                </thead>
+                <tbody id=\"rows\"></tbody>
+            </table>
+        </div>
+        <div class=\"meta\">
+            <div id=\"mode\">Mode: --</div>
+            <div id=\"event\">Event: --</div>
+        </div>
+        <div class=\"status\" id=\"status\">Waiting for data…</div>
+    </div>
+
+    <script>
+        const qs = new URLSearchParams(window.location.search);
+        if (!qs.has('limit')) qs.set('limit', '10');
+        const targetRows = Math.max(1, Number.parseInt(qs.get('limit') || '10', 10) || 10);
+
+        const modeEl = document.getElementById('mode');
+        const eventEl = document.getElementById('event');
+        const rowsEl = document.getElementById('rows');
+        const statusEl = document.getElementById('status');
+
+        function fmtTime(v) {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return '--';
+            return n.toFixed(3) + 's';
+        }
+
+        function renderRows(entries) {
+            const realEntries = Array.isArray(entries) ? entries : [];
+            let html = '';
+
+            for (let i = 0; i < targetRows; i += 1) {
+                if (i < realEntries.length) {
+                    const row = realEntries[i];
+                    const rank = row.rank ?? '--';
+                    const name = (row.participant_name && String(row.participant_name).trim()) || 'UNKNOWN';
+                    const height = row.final_height ?? '--';
+                    const time = fmtTime(row.completion_time_s);
+                    html += `<tr><td>${rank}</td><td>${name}</td><td>${height}</td><td>${time}</td></tr>`;
+                } else {
+                    html += '<tr class="empty"><td>—</td><td></td><td></td><td></td></tr>';
+                }
+            }
+
+            rowsEl.innerHTML = html;
+        }
+
+        async function tick() {
+            try {
+                const resp = await fetch('/leaderboard?' + qs.toString(), { cache: 'no-store' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                modeEl.textContent = 'Mode: ' + (data.mode ?? '--');
+                eventEl.textContent = 'Event: ' + (data.current_official_event_id ?? '--');
+                renderRows(data.entries || []);
+                statusEl.textContent = '';
+            } catch (_err) {
+                modeEl.textContent = 'Mode: --';
+                eventEl.textContent = 'Event: --';
+                rowsEl.innerHTML = '<tr><td colspan=\"4\" style=\"color:#9ab0d0\">Waiting for data…</td></tr>';
+                statusEl.textContent = 'Waiting for data…';
+            }
+        }
+
+        tick();
+        setInterval(tick, 1000);
+    </script>
+</body>
+</html>
+"""
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/assets/"):
+            assets_root = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "assets")
+            )
+            rel_path = parsed.path[len("/assets/"):]
+            requested_path = os.path.abspath(os.path.join(assets_root, rel_path))
+
+            if not requested_path.startswith(assets_root + os.sep):
+                self._send_json(404, {"error": "not_found"})
+                return
+
+            if not os.path.isfile(requested_path):
+                self._send_json(404, {"error": "not_found"})
+                return
+
+            ext = os.path.splitext(requested_path)[1].lower()
+            if ext == ".png":
+                content_type = "image/png"
+            elif ext in {".jpg", ".jpeg"}:
+                content_type = "image/jpeg"
+            elif ext == ".svg":
+                content_type = "image/svg+xml"
+            else:
+                content_type = "application/octet-stream"
+
+            try:
+                with open(requested_path, "rb") as f:
+                    data = f.read()
+                self._send_bytes(200, data, content_type)
+            except Exception:
+                self._send_json(404, {"error": "not_found"})
+            return
+
+        if parsed.path == "/":
+            self._send_html(200, self._kiosk_html())
+            return
+
+        if parsed.path != "/leaderboard":
+            self._send_json(404, {"error": "not_found"})
+            return
+
+        qs = parse_qs(parsed.query)
+        try:
+            limit = int(qs.get("limit", ["10"])[0])
+        except Exception:
+            limit = 10
+        limit = max(1, min(200, limit))
+
+        mode_override = qs.get("mode", [None])[0]
+        effective_mode = _normalize_leaderboard_mode(mode_override) if mode_override else _normalize_leaderboard_mode(LEADERBOARD_MODE)
+        event_override_raw = qs.get("event_id", [None])[0]
+        event_override = str(event_override_raw).strip() if event_override_raw is not None else None
+        if event_override == "":
+            event_override = None
+
+        rows = _load_leaderboard_records()
+        rows = [r for r in rows if _normalize_leaderboard_mode(r.get("mode", "DEV")) == effective_mode]
+        if event_override is not None:
+            rows = [r for r in rows if str(r.get("event_id", "")).strip() == event_override]
+        rows.sort(
+            key=lambda r: (
+                -int(r.get("final_height", 0)),
+                float(r.get("completion_time_s", 1e12)),
+                float(r.get("ended_at_unix", 0.0)),
+            )
+        )
+
+        top = rows[:limit]
+        ranked = []
+        for idx, row in enumerate(top, start=1):
+            item = dict(row)
+            item["rank"] = idx
+            ranked.append(item)
+
+        self._send_json(
+            200,
+            {
+                "mode": effective_mode,
+                "event_id": event_override,
+                "current_official_event_id": OFFICIAL_EVENT_ID,
+                "limit": limit,
+                "count": len(ranked),
+                "entries": ranked,
+            },
+        )
+
+    def log_message(self, format, *args):
+        return
+
+
+def leaderboard_http_server() -> None:
+    server = ThreadingHTTPServer(("0.0.0.0", LEADERBOARD_PORT), _LeaderboardHandler)
+    info("STACK", f"[LEADERBOARD] HTTP server listening on {LEADERBOARD_PORT}")
+    try:
+        while not STOP_EVENT.is_set():
+            server.handle_request()
+    finally:
+        try:
+            server.server_close()
+        except Exception:
+            pass
+
+
+_load_leaderboard_mode()
+
+
 # --- SIGNIFIER: prove which file is running ---
 def _startup_banner():
     try:
@@ -230,6 +719,8 @@ _startup_banner()
 
 # --- 2. CAMERA PIPELINE ---
 def create_pipeline(enable_rawL: bool = False):
+    if (not CAMERA_STREAM_ENABLED) or (dai is None):
+        raise RuntimeError("DepthAI pipeline unavailable: camera streaming disabled or DepthAI import failed")
     pipeline = dai.Pipeline()
 
     monoL = pipeline.create(dai.node.MonoCamera)
@@ -273,6 +764,8 @@ def create_pipeline(enable_rawL: bool = False):
 
 # --- 3. HIGHWAY 1: VIDEO SERVER ---
 def camera_server(mxid, port, label):
+    if (not CAMERA_STREAM_ENABLED) or (dai is None):
+        return
     enable_rawL = (label == "INSPECTOR" and VISION_MODE_ENABLED and PERC_AVAILABLE)
     pipeline = create_pipeline(enable_rawL=enable_rawL)
     server = None
@@ -404,6 +897,14 @@ def _send_line_to_unity(line: str) -> bool:
         return False
 
 
+def send_ack(cmd: str) -> bool:
+    return _send_line_to_unity(f"ACK {cmd}")
+
+
+def send_nack(cmd: str, reason: str) -> bool:
+    return _send_line_to_unity(f"NACK {cmd} {reason}")
+
+
 def _push_zone_if_needed(force: bool = False) -> None:
     global _last_sent_zone
     if _unity_command_conn is None:
@@ -417,7 +918,7 @@ def _push_zone_if_needed(force: bool = False) -> None:
 
 def _handle_post_tower_hover(module: str, my_token) -> bool:
     """Handle post-hover fault check and AT_TOWER_HOVER transition in one place."""
-    global STATE, block_attempt_start_ts, proposed_place_pose, proposed_place_stack_level
+    global STATE, block_attempt_start_ts, drop_committed_this_window, decision_seq, proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level
 
     m = handles.robot.robot_mode()
@@ -438,6 +939,9 @@ def _handle_post_tower_hover(module: str, my_token) -> bool:
         STATE = result.next_state
         info(module, f"[SM] -> {STATE.name} (AT_TOWER_HOVER)")
         if STATE == State.WAITING_FOR_DECISION:
+            drop_committed_this_window = False
+            decision_seq += 1
+            _send_line_to_unity(f"DECISION_READY {decision_seq}")
             if current_stack_level is not None and current_stack_level >= 0:
                 base_place = cfg.tower_place_pose(current_stack_level)
                 proposed_place_pose = drift_engine.inject_drift(base_place, current_stack_level)
@@ -474,9 +978,11 @@ def handle_command(cmd_str: str, source: str) -> None:
     """
     global STATE, robot_armed, gripper_connected, controller_busy
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
-    global participant_name, session_id, tower_attempt_start_ts, run_start_time, block_attempt_start_ts, holding_block, current_session_token
+    global participant_name, session_id, tower_attempt_start_ts, run_start_time, block_attempt_start_ts, drop_committed_this_window, decision_seq, holding_block, current_session_token
     global proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active
+    global run_id, run_finalized
+    global LEADERBOARD_MODE, OFFICIAL_EVENT_ID
     global _last_nudge_t
 
     # Normalize command
@@ -502,6 +1008,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         tower_attempt_start_ts = None
         run_start_time = None
         block_attempt_start_ts = None
+        drop_committed_this_window = False
         holding_block = False
         controller_busy = False
         current_session_token = uuid4()
@@ -512,16 +1019,33 @@ def handle_command(cmd_str: str, source: str) -> None:
         green_place_streak = 0
         combo_active = False
         handles.combo_active = combo_active
+        run_id = None
+        run_finalized = False
+        _send_line_to_unity("NAME_SET")
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
         info("CONTROL", f"Participant set: {participant_name}. Ready to START.")
         return
 
     if upper_cmd == "TUMBLE":
+        # Preempt any in-flight or queued stack continuation immediately.
         current_session_token = uuid4()
-        controller_busy = False
+
+        waited = False
+        while controller_busy:
+            if not waited:
+                info(module, "[TUMBLE] Controller busy; waiting to execute tumble...")
+                waited = True
+            time.sleep(0.05)
+
+        if waited:
+            info(module, "[TUMBLE] Controller free; executing queued tumble.")
+
+        controller_busy = True
         # Run summary before any state/session reset
         blocks_placed = current_stack_level
         run_time_s = emit_run_summary("TUMBLE")
+        finalize_run("TUMBLE")
+        _send_line_to_unity("RUN_FAIL TUMBLE")
 
         log_event(
             "EVENT_RUN_SUMMARY",
@@ -531,22 +1055,32 @@ def handle_command(cmd_str: str, source: str) -> None:
             source=source,
         )
 
-        log_event("EVENT_TUMBLE", source=source, holding_block=holding_block)
         try:
-            actions.safe_reset_after_tumble(handles, holding_block)
+            info(module, f"[TUMBLE] enter state={STATE.name} holding_block_flag={holding_block}")
+            detected_holding = actions.execute_tumble_sequence(handles, fallback_holding=holding_block)
+            info(module, f"[TUMBLE] completed detected_holding={detected_holding}")
+            log_event(
+                "EVENT_TUMBLE",
+                source=source,
+                state_before=STATE.name,
+                holding_block_flag=holding_block,
+                holding_detected=detected_holding,
+            )
         except Exception as e:
-            warn(module, f"[{source}] TUMBLE reset failed: {e}")
+            warn(module, f"[{source}] TUMBLE failed: {e}")
             log_event("EVENT_TUMBLE_RESET_ERROR", source=source, error=str(e))
+        finally:
+            controller_busy = False
 
         STATE = State.IDLE
         current_pick_index = 0
         current_stack_level = 0
         holding_block = False
-        controller_busy = False
         participant_name = None
         tower_attempt_start_ts = None
         run_start_time = None
         block_attempt_start_ts = None
+        drop_committed_this_window = False
         proposed_place_pose = None
         proposed_place_stack_level = None
         current_zone = "GREEN"
@@ -554,8 +1088,36 @@ def handle_command(cmd_str: str, source: str) -> None:
         green_place_streak = 0
         combo_active = False
         handles.combo_active = combo_active
+        run_id = None
+        run_finalized = False
         if getattr(cfg, "RUN_MODE", "DEBUG") == "COMP" and vr_connected:
             print("Waiting for participant name...")
+        return
+
+    if upper_cmd == "MODE SHOW":
+        info(module, f"[LEADERBOARD] MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}")
+        return
+
+    if upper_cmd == "MODE DEV":
+        LEADERBOARD_MODE = "DEV"
+        _save_leaderboard_mode()
+        info(module, f"[LEADERBOARD] MODE set to DEV (event_id={OFFICIAL_EVENT_ID})")
+        return
+
+    if upper_cmd == "MODE OFFICIAL":
+        LEADERBOARD_MODE = "OFFICIAL"
+        _save_leaderboard_mode()
+        info(module, f"[LEADERBOARD] MODE set to OFFICIAL (event_id={OFFICIAL_EVENT_ID})")
+        return
+
+    if upper_cmd.startswith("EVENT "):
+        new_event_id = cmd_str[6:].strip()
+        if not new_event_id:
+            warn(module, "[LEADERBOARD] EVENT command requires a non-empty id (e.g., EVENT ARC2026).")
+            return
+        OFFICIAL_EVENT_ID = new_event_id
+        _save_leaderboard_mode()
+        info(module, f"[LEADERBOARD] EVENT set to {OFFICIAL_EVENT_ID}")
         return
 
     # SAFE_RESET short-circuit (before parsing)
@@ -567,6 +1129,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             STATE = State.IDLE
             current_pick_index = 0
             current_stack_level = 0
+            drop_committed_this_window = False
             proposed_place_pose = None
             proposed_place_stack_level = None
             current_zone = "GREEN"
@@ -582,16 +1145,90 @@ def handle_command(cmd_str: str, source: str) -> None:
         warn(module, f"[CMD] Reject: {e}")
         return
 
+    drop_token = None
+    fix_token = None
+    if event == Event.DROP:
+        parts = cmd_str.strip().split()
+        if len(parts) < 2:
+            send_nack("DROP", "BAD_FORMAT")
+            info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP missing decision token")
+            return
+        try:
+            drop_token = int(parts[1])
+        except ValueError:
+            send_nack("DROP", "BAD_FORMAT")
+            info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP invalid decision token")
+            return
+
+    if event == Event.FIX:
+        parts = cmd_str.strip().split()
+        if len(parts) < 2:
+            info(module, "[FIX][PY] send NACK FIX reason=BAD_FORMAT")
+            send_nack("FIX", "BAD_FORMAT")
+            info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=FIX missing decision token")
+            return
+        try:
+            fix_token = int(parts[1])
+        except ValueError:
+            info(module, "[FIX][PY] send NACK FIX reason=BAD_FORMAT")
+            send_nack("FIX", "BAD_FORMAT")
+            info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=FIX invalid decision token")
+            return
+
+    if event == Event.FIX:
+        info(module, f"[FIX][PY] recv FIX (STATE={STATE.name})")
+
     # Session participant gate
     if (participant_name is None or participant_name.strip() == "") and event in {Event.START_STACK, Event.VISION_RETRY, Event.DROP, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW}:
         warn(module, f"[GATE] Participant name required. Rejecting: {cmd_str}")
+        if event == Event.START_STACK:
+            send_nack("START", "NO_NAME")
+        if event == Event.DROP:
+            send_nack("DROP", "NO_NAME")
+        if event == Event.FIX:
+            info(module, "[FIX][PY] send NACK FIX reason=NO_NAME")
+            send_nack("FIX", "NO_NAME")
         log_event("EVENT_REJECT_NO_NAME", cmd=cmd_str, source=source)
+        return
+
+    if event == Event.FIX and STATE != State.WAITING_FOR_DECISION:
+        info(module, "[FIX][PY] send NACK FIX reason=BAD_STATE")
+        send_nack("FIX", "BAD_STATE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=FIX requires WAITING_FOR_DECISION")
+        return
+
+    if event == Event.FIX and fix_token != decision_seq:
+        info(module, "[FIX][PY] send NACK FIX reason=STALE")
+        send_nack("FIX", "STALE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=FIX stale token (got={fix_token}, expected={decision_seq})")
         return
 
     # Gate transition using state machine
     result = step(STATE, event)
     if not result.allowed:
+        if event == Event.START_STACK:
+            send_nack("START", "BAD_STATE")
+        if event == Event.DROP:
+            send_nack("DROP", "BAD_STATE")
+        if event == Event.FIX:
+            info(module, "[FIX][PY] send NACK FIX reason=BAD_STATE")
+            send_nack("FIX", "BAD_STATE")
         info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason={result.reason}")
+        return
+
+    if event == Event.DROP and STATE not in {State.WAITING_FOR_DECISION, State.NUDGE}:
+        send_nack("DROP", "BAD_STATE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP requires WAITING_FOR_DECISION or NUDGE")
+        return
+
+    if event == Event.DROP and drop_token != decision_seq:
+        send_nack("DROP", "STALE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP stale token (got={drop_token}, expected={decision_seq})")
+        return
+
+    if event == Event.DROP and STATE in {State.WAITING_FOR_DECISION, State.NUDGE} and drop_committed_this_window:
+        send_nack("DROP", "DUPLICATE")
+        info(module, f"[SM] Blocked: {cmd_str} | state={STATE.name} | reason=DROP duplicate (latch={drop_committed_this_window})")
         return
 
     # Safety gates BEFORE committing state transition
@@ -599,6 +1236,13 @@ def handle_command(cmd_str: str, source: str) -> None:
     # issued when disarmed, since it's responsible for re-enabling the robot.
     if event != Event.AUTO_RECOVER and event in {Event.HOME, Event.FIX, Event.NUDGE_XY, Event.NUDGE_YAW, Event.DROP, Event.START_STACK, Event.VISION_RETRY}:
         if not robot_armed:
+            if event == Event.START_STACK:
+                send_nack("START", "NOT_ARMED")
+            if event == Event.DROP:
+                send_nack("DROP", "NOT_ARMED")
+            if event == Event.FIX:
+                info(module, "[FIX][PY] send NACK FIX reason=NOT_ARMED")
+                send_nack("FIX", "NOT_ARMED")
             warn(module, "[GATE] Robot not armed. Ignoring motion command.")
             return
 
@@ -657,16 +1301,22 @@ def handle_command(cmd_str: str, source: str) -> None:
 
     elif event in {Event.START_STACK, Event.VISION_RETRY}:
         if controller_busy:
+            if event == Event.START_STACK:
+                send_nack("START", "BUSY")
             warn(module, "[GATE] Controller busy.")
             return
         controller_busy = True
         try:
             # Bounds checking
             if current_pick_index >= len(cfg.PICK_SEQUENCE):
+                if event == Event.START_STACK:
+                    send_nack("START", "BAD_STATE")
                 warn(module, "[STACK] No more blocks in PICK_SEQUENCE. Ignoring START.")
                 return
 
             if current_stack_level >= 7:
+                if event == Event.START_STACK:
+                    send_nack("START", "BAD_STATE")
                 warn(module, "[STACK] Tower full. Ignoring START.")
                 return
 
@@ -675,9 +1325,14 @@ def handle_command(cmd_str: str, source: str) -> None:
                 current_session_token = uuid4()
                 tower_attempt_start_ts = time.monotonic()
                 run_start_time = tower_attempt_start_ts
+                run_id = uuid4().hex
+                run_finalized = False
                 green_place_streak = 0
                 combo_active = False
                 handles.combo_active = combo_active
+
+            if event == Event.START_STACK:
+                send_ack("START")
 
             # Execute pick sequence
             my_token = current_session_token
@@ -686,7 +1341,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             try:
                 actions.execute_pick_sequence(handles, side, level)
             except actions.PickPoseUnavailableError as e:
-                if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower() == "vision":
+                if VISION_MODE_ENABLED:
                     _handle_vision_pick_unavailable(e.reason)
                     return
                 raise
@@ -719,6 +1374,8 @@ def handle_command(cmd_str: str, source: str) -> None:
 
     elif event == Event.FIX:
         # no motion yet; just entering NUDGE
+        info(module, "[FIX][PY] send ACK FIX")
+        send_ack("FIX")
         pass
 
     elif event == Event.NUDGE_XY:
@@ -807,10 +1464,13 @@ def handle_command(cmd_str: str, source: str) -> None:
         block_attempt_start_ts = None
 
         if controller_busy:
+            send_nack("DROP", "BUSY")
             warn(module, "[GATE] Controller busy.")
             return
+        drop_committed_this_window = True
         controller_busy = True
         try:
+            send_ack("DROP")
             my_token = current_session_token
             zone_at_commit = "UNKNOWN"
             # Attempt placement with error handling
@@ -911,9 +1571,21 @@ def handle_command(cmd_str: str, source: str) -> None:
 
                 if tower_complete:
                     emit_run_summary("COMPLETE")
+                    finalize_run("COMPLETE")
                     _send_line_to_unity(f"RUN_COMPLETE {current_stack_level}")
                     time.sleep(5.0)
                     info(module, "[STACK] COMPLETE summary emitted (post-wait)")
+
+                    current_pick_index = 0
+                    current_stack_level = 0
+                    holding_block = False
+                    proposed_place_pose = None
+                    proposed_place_stack_level = None
+                    block_attempt_start_ts = None
+                    drop_committed_this_window = False
+                    tower_attempt_start_ts = None
+                    run_start_time = None
+                    participant_name = None
                     return
 
                 # Auto-continue stacking if enabled and targets remain
@@ -930,7 +1602,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         try:
                             actions.execute_pick_sequence(handles, side, level)
                         except actions.PickPoseUnavailableError as e:
-                            if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower() == "vision":
+                            if VISION_MODE_ENABLED:
                                 warn(module, f"[VISION] pick pose unavailable: {e.reason}")
                                 _send_line_to_unity("VISION_STATUS FAIL")
                                 STATE = State.WAITING_FOR_REPOSITION
@@ -1015,6 +1687,7 @@ def command_server():
     global _unity_command_conn, _last_sent_zone
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
     global green_place_streak, combo_active
+    global run_id, run_finalized
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1057,6 +1730,8 @@ def command_server():
             green_place_streak = 0
             combo_active = False
             handles.combo_active = combo_active
+            run_id = None
+            run_finalized = False
 
             # Arm once for this VR session
             try:
@@ -1225,32 +1900,99 @@ def facilitator_hotkey_loop():
             if not line:
                 continue
 
-            lowered = line.lower()
-            if lowered in {"h", "help"}:
+            parts = line.split(maxsplit=1)
+            head = parts[0].lower() if parts else ""
+            tail = parts[1].strip() if len(parts) > 1 else ""
+            tokens = line.split()
+            lowered_tokens = [t.lower() for t in tokens]
+
+            if head in {"h", "help"}:
                 info("CONTROL", "[FACILITATOR] Commands:")
                 info("CONTROL", "  t | tumble           -> TUMBLE")
                 info("CONTROL", "  r | recover          -> AUTO_RECOVER")
                 info("CONTROL", "  n <name>             -> NAME <name>")
                 info("CONTROL", "  name <name>          -> NAME <name>")
+                info("CONTROL", "  mode show            -> MODE SHOW")
+                info("CONTROL", "  mode dev             -> MODE DEV")
+                info("CONTROL", "  mode official        -> MODE OFFICIAL")
+                info("CONTROL", "  event <id>           -> EVENT <id>")
                 info("CONTROL", "  h | help             -> this help")
                 continue
 
-            if lowered in {"t", "tumble"}:
+            facilitator_mode_cmd = None
+
+            if head in {"t", "tumble"}:
                 cmd = "TUMBLE"
-            elif lowered in {"r", "recover"}:
+            elif head in {"r", "recover"}:
                 cmd = "AUTO_RECOVER"
-            elif lowered.startswith("n ") or lowered.startswith("name "):
-                name = line.split(" ", 1)[1].strip()
+            elif head in {"n", "name"}:
+                name = tail
                 if not name:
                     warn("CONTROL", "[FACILITATOR] Usage: n <name>  (or: name <name>)")
                     continue
                 cmd = f"NAME {name}"
+            elif len(lowered_tokens) >= 2 and lowered_tokens[0] == "mode":
+                mode_arg = lowered_tokens[1]
+                if mode_arg == "show":
+                    cmd = "MODE SHOW"
+                    facilitator_mode_cmd = "MODE_SHOW"
+                elif mode_arg == "dev":
+                    cmd = "MODE DEV"
+                    facilitator_mode_cmd = "MODE_DEV"
+                elif mode_arg == "official":
+                    cmd = "MODE OFFICIAL"
+                    facilitator_mode_cmd = "MODE_OFFICIAL"
+                else:
+                    warn("CONTROL", "[FACILITATOR] Usage: mode show|dev|official")
+                    continue
+            elif head == "event":
+                event_id = tail
+                if not event_id:
+                    warn("CONTROL", "[FACILITATOR] Usage: event <id>")
+                    continue
+                cmd = f"EVENT {event_id}"
+                facilitator_mode_cmd = "EVENT_SET"
             else:
                 warn("CONTROL", f"[FACILITATOR] Unknown command: {line} (type 'h' or 'help')")
                 continue
 
             try:
                 handle_command(cmd, "FACILITATOR")
+
+                if facilitator_mode_cmd is not None:
+                    if facilitator_mode_cmd == "MODE_SHOW":
+                        ack = f"MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}"
+                        print(ack)
+                        info("CONTROL", f"[FACILITATOR] {ack}")
+                    elif facilitator_mode_cmd == "MODE_DEV":
+                        ack = f"MODE set to DEV (event_id={OFFICIAL_EVENT_ID})"
+                        show = f"MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}"
+                        print(ack)
+                        print(show)
+                        info("CONTROL", f"[FACILITATOR] {ack}")
+                        info("CONTROL", f"[FACILITATOR] {show}")
+                    elif facilitator_mode_cmd == "MODE_OFFICIAL":
+                        ack = f"MODE set to OFFICIAL (event_id={OFFICIAL_EVENT_ID})"
+                        show = f"MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}"
+                        print(ack)
+                        print(show)
+                        info("CONTROL", f"[FACILITATOR] {ack}")
+                        info("CONTROL", f"[FACILITATOR] {show}")
+                    elif facilitator_mode_cmd == "EVENT_SET":
+                        ack = f"EVENT set to {OFFICIAL_EVENT_ID} (MODE={LEADERBOARD_MODE})"
+                        show = f"MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}"
+                        print(ack)
+                        print(show)
+                        info("CONTROL", f"[FACILITATOR] {ack}")
+                        info("CONTROL", f"[FACILITATOR] {show}")
+                else:
+                    upper_cmd = cmd.upper()
+                    if upper_cmd == "TUMBLE" or upper_cmd.startswith("NAME "):
+                        pass
+                    else:
+                        ack = f"OK: {cmd}"
+                        print(ack)
+                        info("CONTROL", f"[FACILITATOR] {ack}")
             except Exception as e:
                 warn("CONTROL", f"[FACILITATOR] Command error: {e}")
         except EOFError:
@@ -1268,9 +2010,11 @@ def _start_worker_thread(name: str, target, args=(), daemon: bool = False) -> No
 # --- 5. START SYSTEM ---
 _start_worker_thread("command-server", command_server)
 _start_worker_thread("admin-server", admin_server)
-_start_worker_thread("camera-inspector", camera_server, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
-time.sleep(10)
-_start_worker_thread("camera-site-manager", camera_server, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
+_start_worker_thread("leaderboard-http", leaderboard_http_server)
+if CAMERA_STREAM_ENABLED and (dai is not None):
+    _start_worker_thread("camera-inspector", camera_server, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
+    time.sleep(10)
+    _start_worker_thread("camera-site-manager", camera_server, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
 if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
     print("Start Unity and press Play...")
 _start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)

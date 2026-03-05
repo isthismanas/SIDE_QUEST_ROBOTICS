@@ -62,7 +62,7 @@ class PickPoseUnavailableError(RuntimeError):
 
 def _active_pick_pose_provider() -> PickPoseProvider:
     mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower()
-    if mode == "vision":
+    if mode in {"vision", "perception"}:
         return VisionPickPoseProvider()
     return DeterministicPickPoseProvider()
 
@@ -232,22 +232,79 @@ def recover_from_fault(handles: SystemHandles) -> bool:
     print("[RECOVERY] recover_from_fault: complete")
     return True
 
-
-def safe_reset_after_tumble(handles: SystemHandles, holding_block: bool) -> None:
+def _is_gripper_holding_block(handles: SystemHandles, fallback_holding: Optional[bool]) -> bool:
     """
-    Safe reset flow used after a tower tumble.
-
-    1) If currently holding a block, move to SAFE_DUMP_POSE and release.
-    2) Move to SAFE_HOME_POSE.
-    3) Ensure gripper is open (idempotent).
+    Conservative holding detector for tumble routing.
+    Priority:
+    1) grip_state==2 (caught) -> holding
+    2) current position near closed side -> holding
+    3) fallback_holding when status unavailable
+    4) conservative default True
     """
-    if holding_block:
-        handles.robot.movj_pose(cfg.SAFE_DUMP_POSE)
+    try:
+        st = handles.gripper.status()
+        grip_state = st.get("grip_state")
+        pos = st.get("pos")
+        if grip_state == 2:
+            return True
+        if isinstance(pos, (int, float)):
+            midpoint = (cfg.GRIPPER_OPEN_POS + cfg.GRIPPER_CLOSE_POS) / 2.0
+            return pos <= midpoint
+    except Exception as e:
+        warn("STACK", f"[TUMBLE] Gripper status read failed, using fallback: {e}")
+
+    if fallback_holding is not None:
+        return bool(fallback_holding)
+    return True
+
+
+def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[bool] = None) -> bool:
+    """
+    Deterministic tumble flow.
+    Returns detected holding state before executing motions.
+
+    A) Holding -> SAFE_DUMP_POSE -> open -> NEUTRAL_3
+    B) Not holding -> NEUTRAL_3
+    """
+    holding = _is_gripper_holding_block(handles, fallback_holding)
+    info("STACK", f"[TUMBLE] holding_detected={holding} fallback_holding={fallback_holding}")
+
+    if holding:
+        dump_pose = cfg.SAFE_DUMP_POSE
+        dump_hover_pose = (
+            dump_pose[0],
+            dump_pose[1],
+            dump_pose[2] + cfg.PLACE_CLEARANCE_MM,
+            dump_pose[3],
+            dump_pose[4],
+            dump_pose[5],
+        )
+
+        info("STACK", f"[TUMBLE] branch=A step=move_dump_hover pose={dump_hover_pose}")
+        handles.robot.movj_pose(dump_hover_pose)
+        handles.robot.wait_until_idle()
+
+        info("STACK", f"[TUMBLE] branch=A step=movl_down_dump pose={dump_pose}")
+        handles.robot.speed_factor(cfg.SPEED_PRECISION)
+        handles.robot.movl_pose(dump_pose)
+        handles.robot.wait_until_idle()
+
+        info("STACK", "[TUMBLE] branch=A step=open_gripper")
         handles.gripper.open()
         time.sleep(0.2)
 
-    handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
-    handles.gripper.open()
+        info("STACK", f"[TUMBLE] branch=A step=movl_up_hover pose={dump_hover_pose}")
+        handles.robot.speed_factor(cfg.SPEED_PRECISION)
+        handles.robot.movl_pose(dump_hover_pose)
+        handles.robot.wait_until_idle()
+
+        info("STACK", f"[TUMBLE] branch=A step=move_neutral3 pose={cfg.NEUTRAL_3}")
+        handles.robot.movj_pose(cfg.NEUTRAL_3)
+    else:
+        info("STACK", f"[TUMBLE] branch=B step=move_neutral3 pose={cfg.NEUTRAL_3}")
+        handles.robot.movj_pose(cfg.NEUTRAL_3)
+
+    return holding
 
 
 

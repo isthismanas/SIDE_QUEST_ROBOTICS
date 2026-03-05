@@ -114,6 +114,29 @@ Unity updates visual indicator
 
 Video stream remains fully isolated from control channel.
 
+### Dev Update – Decision Token Protocol (Dev XX)
+
+Purpose: prevent stale/queued XR decisions across blocks.
+
+Protocol:
+- Python emits `DECISION_READY <token>` at hover.
+- Unity sends `DROP <token>` and `FIX <token>`.
+
+Validation:
+- Commands are valid only for the current decision window (`WAITING_FOR_DECISION`).
+- Missing/invalid token → reject.
+- Stale token (e.g., got 1, expected 2) → reject.
+
+UI behavior:
+- Decision window: FIX + DROP enabled.
+- Fix mode (NUDGE): DROP + NUDGE enabled, FIX disabled.
+- Robot busy: decision buttons disabled.
+
+Result:
+- One valid decision per block.
+- No queued stale XR commands.
+- XR UI stays in sync with backend state.
+
 ================================================================
 
 6. Operator Interface Design (Dev 12)
@@ -231,5 +254,66 @@ Authority remains centralized on the robotics control node.
 
 ================================================================
 
+10. Leaderboard & Competition Infrastructure (Dev18)
+
+http://192.168.5.10:8090/
+
+### A) Architecture Decision
+
+- Leaderboard authority is on the Raspberry Pi Task Controller, not Unity.
+- Unity remains visualization/supervisory only and does not compute rankings.
+- Run finalization happens in controller flow via `finalize_run()` at terminal outcomes.
+
+### B) Data Model
+
+Each finalized leaderboard record includes:
+
+- `run_id`
+- `session_id`
+- `participant_name`
+- `final_height` (bounded by tower target, max 7 in current configuration)
+- `completion_time_s`
+- `end_state` (`COMPLETE`, `TUMBLE`, `FAULT`, `CANCEL`)
+- `mode` (`DEV` or `OFFICIAL`)
+- `event_id`
+
+### C) Persistence
+
+- Leaderboard mode/event configuration is persisted at:
+  - `logs/leaderboard_mode.json`
+- Leaderboard records are persisted to mode-scoped JSONL:
+  - `logs/dev/leaderboard.jsonl`
+  - `logs/official/leaderboard.jsonl`
+- Session event JSONL is OFFICIAL-only and written under:
+  - `logs/official/session_<id>.jsonl`
+
+### D) Mode System
+
+Live control commands:
+
+- `MODE DEV`
+- `MODE OFFICIAL`
+- `MODE SHOW`
+- `EVENT <event_id>`
+
+Operational behavior:
+
+- Mode and event ID persist across restarts through `leaderboard_mode.json`.
+- Mode switch changes record tagging and default leaderboard view; it does not rewrite historical JSONL.
+
+### E) HTTP API (Port 8090)
+
+- `GET /leaderboard`
+  - Query params:
+    - `mode`
+    - `event_id`
+    - `limit`
+- `GET /` serves kiosk HTML from the controller process.
+- `GET /assets/<file>` serves static kiosk assets (e.g., logos).
+
+================================================================
+
 cd ~/SIDE_QUEST_ROBOTICS/Robotics/motion
 ./run_controller.sh
+
+================================================================
