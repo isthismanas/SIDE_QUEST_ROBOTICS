@@ -4,6 +4,8 @@ Project: Side Quest: The Leaning Tower of Regolith (ARC 2026 Target)
 Sub-Team: Robotics
 Last Updated: 26 Feb 2026 (Dev 12 – Tolerance Engine + Combo Flow B + Run Completion Stable)
 
+Dev 24 Note (UI-side): No functional robotics pipeline changes; only XR operator UI interaction-layer updates.
+
 ================================================================
 
 1. Objective
@@ -240,26 +242,25 @@ Validated for full 7-block autonomous stacking.
 ================================================================
 
 5. Drift Injection Architecture (Dev 10–12 Stable)
-
-Drift is injected deterministically at the pose proposal stage:
-
-Detection → Base Transform → Drift Injection → Proposed Pose → Control Layer
-
 Properties:
 
 • Z-axis excluded
 • Orientation excluded
 • Bounded magnitude (configurable)
-• Deterministic per (run_seed, stack_level)
 • Adjustable via DRIFT_SCALE
 • Does not modify retreat geometry
 • Does not bypass safety envelopes
 
-Current ARC configuration (Dev 12):
 
-• Drift currently applied along X-axis only
-  (Y-axis temporarily muted until bidirectional nudge UI is re-enabled)
-• Deterministic seed-based injection
+### Dev Update – 6 Mar 2026
+
+- Added per-run drift randomization (`runtime_run_seed`) while preserving deterministic replay via forced seed override.
+- Effective seed now combines baseline `DRIFT_RUN_SEED` + runtime run seed + participant name + stack level.
+- Drift is injected during the tower hover move (no post-hover correction move), reducing visible entry jerk into decision state.
+- OFFICIAL session logs now include drift metadata: participant, runtime seed, baseline seed, drift scale at run start, and per-level drift `dx/dy`.
+- Runtime console verbosity now supports `DEBUG ON/OFF`; DEBUG OFF suppresses non-critical diagnostics while fault/collision warnings remain visible.
+- Quiet mode suppresses repeated READY/camera/VR informational chatter; critical fault outputs remain intentionally visible.
+ 
 • RED placements increase DRIFT_SCALE incrementally
 
 Drift modifies only the proposed placement pose.

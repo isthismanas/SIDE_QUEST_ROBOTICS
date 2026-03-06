@@ -58,6 +58,7 @@ public class RobotCommandPipe : MonoBehaviour
 
     void Start()
     {
+        Debug.Log($"[NUDGE_CFG] nudgeStep={nudgeStep:F2}");
         Connect();
     }
 
@@ -319,8 +320,8 @@ public class RobotCommandPipe : MonoBehaviour
     // =========================
     public void NudgeRight() => SendNudge(nudgeStep, 0f);
     public void NudgeLeft() => SendNudge(-nudgeStep, 0f);
-    public void NudgeUp() => SendNudge(0f, nudgeStep);
-    public void NudgeDown() => SendNudge(0f, -nudgeStep);
+    public void NudgeUp() => SendNudge(0f, 1f);
+    public void NudgeDown() => SendNudge(0f, -1f);
 
 
     // =========================
@@ -332,10 +333,10 @@ public class RobotCommandPipe : MonoBehaviour
     public void BeginNudgeLeft() => StartHoldNudge(-nudgeStep, 0f);
     public void EndNudgeLeft() => StopHoldNudge();
 
-    public void BeginNudgeUp() => StartHoldNudge(0f, nudgeStep);
+    public void BeginNudgeUp() => StartHoldNudge(0f, 1f);
     public void EndNudgeUp() => StopHoldNudge();
 
-    public void BeginNudgeDown() => StartHoldNudge(0f, -nudgeStep);
+    public void BeginNudgeDown() => StartHoldNudge(0f, -1f);
     public void EndNudgeDown() => StopHoldNudge();
 
     void SendNudge(float dx, float dy)

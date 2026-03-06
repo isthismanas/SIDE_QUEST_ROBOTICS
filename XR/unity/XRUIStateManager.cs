@@ -21,6 +21,8 @@ public class XRUIStateManager : MonoBehaviour
 
     public GameObject Button_NudgeLeft;
     public GameObject Button_NudgeRight;
+    public GameObject Button_NudgeForward;
+    public GameObject Button_NudgeBackward;
 
     [Header("Dev Buttons (assign GameObjects)")]
     public GameObject Button_Home;
@@ -240,6 +242,18 @@ public class XRUIStateManager : MonoBehaviour
         ApplyState(_state);
     }
 
+    public void OnNudgeForwardClicked()
+    {
+        commandPipe?.NudgeUp();
+        ApplyState(_state);
+    }
+
+    public void OnNudgeBackwardClicked()
+    {
+        commandPipe?.NudgeDown();
+        ApplyState(_state);
+    }
+
     // Optional future hook (for a Done button or Python signal)
     public void ExitFixMode()
     {
@@ -304,6 +318,8 @@ public class XRUIStateManager : MonoBehaviour
 
         SetActiveSafe(Button_NudgeLeft, false);
         SetActiveSafe(Button_NudgeRight, false);
+        SetActiveSafe(Button_NudgeForward, false);
+        SetActiveSafe(Button_NudgeBackward, false);
 
         // State-specific enables
         switch (_state)
@@ -334,6 +350,8 @@ public class XRUIStateManager : MonoBehaviour
                 SetActiveSafe(Button_Fix, false);
                 SetActiveSafe(Button_NudgeLeft, true);
                 SetActiveSafe(Button_NudgeRight, true);
+                SetActiveSafe(Button_NudgeForward, true);
+                SetActiveSafe(Button_NudgeBackward, true);
                 break;
         }
 
@@ -396,6 +414,8 @@ public class XRUIStateManager : MonoBehaviour
         SetInteractableSafe(Button_Drop, dropEnabled);
         SetInteractableSafe(Button_NudgeLeft, nudgeEnabled);
         SetInteractableSafe(Button_NudgeRight, nudgeEnabled);
+        SetInteractableSafe(Button_NudgeForward, nudgeEnabled);
+        SetInteractableSafe(Button_NudgeBackward, nudgeEnabled);
     }
 
     private void SetCountdownText(string text)

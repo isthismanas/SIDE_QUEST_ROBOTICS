@@ -13,6 +13,7 @@ This driver uses a persistent TCP socket to avoid rapid connect/disconnect issue
 
 import socket
 import time
+import re
 from typing import Optional, Tuple
 from logger import debug, info, warn
 
@@ -221,6 +222,36 @@ class DobotDriver:
             if getattr(_cfg, "RUN_MODE", "DEBUG") == "DEBUG":
                 warn("DOBOT", f"Failed to parse RobotMode() response '{resp}': {e}")
             return -1
+
+    def get_tcp_pose(self) -> Optional[Pose]:
+        """
+        Query current TCP Cartesian pose from dashboard and return
+        (x, y, z, rx, ry, rz) as floats.
+
+        Returns None on communication/parse failure.
+        """
+        cmd = "GetPose()"
+        try:
+            resp = self.send(cmd)
+        except Exception as e:
+            warn("DOBOT", f"GetPose() failed: {e}")
+            return None
+
+        try:
+            # Extract all numeric tokens, including scientific notation.
+            nums = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", resp)]
+            if len(nums) < 6:
+                raise ValueError(f"expected >=6 numeric values, got {len(nums)}")
+
+            # Typical responses include leading error code 0; drop it when present.
+            if resp.strip().startswith("0,") and len(nums) >= 7:
+                nums = nums[1:]
+
+            x, y, z, rx, ry, rz = nums[:6]
+            return (x, y, z, rx, ry, rz)
+        except Exception as e:
+            warn("DOBOT", f"Failed to parse GetPose() response '{resp}': {e}")
+            return None
 
     def wait_until_idle(self, timeout_s: float = 30.0, poll_s: float = 0.1) -> None:
         """

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os, sys
 from math import sqrt
-from typing import Tuple
+from typing import Optional, Tuple
 
 import robot_config as cfg
 
@@ -53,16 +53,25 @@ def radial_error_mm(pose: Pose) -> float:
 	return sqrt((target_x - x0) ** 2 + (target_y - y0) ** 2)
 
 
-def classify_pose(pose: Pose) -> str:
-	r_mm = radial_error_mm(pose)
+def axis_error_mm(pose: Pose, center_xy: Optional[Tuple[float, float]] = None) -> Tuple[float, float]:
+	target_x, target_y = pose[0], pose[1]
+	if center_xy is None:
+		x0, y0 = cfg.TOWER_BASE_POSE[0], cfg.TOWER_BASE_POSE[1]
+	else:
+		x0, y0 = center_xy
+	return abs(target_x - x0), abs(target_y - y0)
+
+
+def classify_pose(pose: Pose, center_xy: Optional[Tuple[float, float]] = None) -> str:
 	green_mm = getattr(cfg, "TOL_GREEN_MM", 3.0)
 	yellow_mm = getattr(cfg, "TOL_YELLOW_MM", 6.0)
 	green_thr = green_mm * cfg.TOLERANCE_SCALE
 	yellow_thr = yellow_mm * cfg.TOLERANCE_SCALE
+	ax_mm, ay_mm = axis_error_mm(pose, center_xy=center_xy)
 
-	if r_mm <= green_thr:
+	if ax_mm <= green_thr and ay_mm <= green_thr:
 		return "GREEN"
-	if r_mm <= yellow_thr:
+	if ax_mm <= yellow_thr and ay_mm <= yellow_thr:
 		return "YELLOW"
 	return "RED"
 

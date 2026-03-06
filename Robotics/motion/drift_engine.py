@@ -14,22 +14,32 @@ Design constraints:
 from __future__ import annotations
 import hashlib
 import random
-from typing import Tuple
+from typing import Optional, Tuple
 import robot_config as cfg
+from logger import info
 
 Pose = Tuple[float, float, float, float, float, float]
 
 
-def _stable_seed(run_seed: int, stack_level: int) -> int:
+def _stable_seed(
+    baseline_seed: int,
+    runtime_run_seed: int,
+    participant: str,
+    stack_level: int,
+) -> Tuple[int, str]:
     """
-    Create deterministic integer seed from run_seed + stack_level.
+    Create deterministic integer seed from baseline seed + runtime seed + participant + stack level.
     """
-    key = f"{run_seed}:{stack_level}".encode()
+    key = f"{baseline_seed}:{runtime_run_seed}:{participant}:{stack_level}".encode()
     digest = hashlib.sha256(key).hexdigest()
-    return int(digest[:16], 16)
+    return int(digest[:16], 16), digest
 
 
-def compute_drift(stack_level: int) -> Tuple[float, float]:
+def compute_drift(
+    stack_level: int,
+    run_seed: Optional[int] = None,
+    participant: Optional[str] = None,
+) -> Tuple[float, float]:
     """
     Compute deterministic XY drift for a given stack level.
     """
@@ -41,7 +51,21 @@ def compute_drift(stack_level: int) -> Tuple[float, float]:
     if effective_max <= 0:
         return 0.0, 0.0
 
-    seed = _stable_seed(cfg.DRIFT_RUN_SEED, stack_level)
+    if getattr(cfg, "DRIFT_USE_RUNTIME_SEED", True):
+        if run_seed is None:
+            run_seed = getattr(cfg, "DRIFT_RUNTIME_RUN_SEED", None)
+        if participant is None:
+            participant = getattr(cfg, "DRIFT_RUNTIME_PARTICIPANT", "")
+
+    runtime_run_seed = int(run_seed) if run_seed is not None else 0
+    participant_value = str(participant or "")
+
+    seed, seed_hex = _stable_seed(
+        int(cfg.DRIFT_RUN_SEED),
+        runtime_run_seed,
+        participant_value,
+        stack_level,
+    )
     rng = random.Random(seed)
 
     if cfg.DRIFT_MODE == "fixed":
@@ -66,15 +90,26 @@ def compute_drift(stack_level: int) -> Tuple[float, float]:
         dx = 0.0
     # else: XY = no change
 
+    if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+        info(
+            "DRIFT",
+            f"level={stack_level} seed={seed_hex[:8]} runtime_seed={runtime_run_seed} participant={participant_value or 'UNKNOWN'} dx={dx:.3f} dy={dy:.3f}",
+        )
+
     return dx, dy
 
 
-def inject_drift(base_pose: Pose, stack_level: int) -> Pose:
+def inject_drift(
+    base_pose: Pose,
+    stack_level: int,
+    run_seed: Optional[int] = None,
+    participant: Optional[str] = None,
+) -> Pose:
     """
     Return a new pose with XY drift applied.
     Z and orientation remain untouched.
     """
-    dx, dy = compute_drift(stack_level)
+    dx, dy = compute_drift(stack_level, run_seed=run_seed, participant=participant)
 
     x, y, z, rx, ry, rz = base_pose
 
