@@ -11,6 +11,9 @@ Keep ALL magic numbers here:
 # ----------------------------
 # Logging Configuration
 # ----------------------------
+# Runtime debug verbosity switch (terminal diagnostics only)
+DEBUG_ENABLED = False
+
 # Run mode
 # Allowed: "COMP", "DEBUG"
 RUN_MODE = "DEBUG"
@@ -76,6 +79,7 @@ NUDGE_STEP_MM = 1         # XY step per button press
 NUDGE_YAW_DEG = 2         # yaw step per button press (optional)
 NUDGE_DZ_MM = 0           # Z locked by design
 NUDGE_COOLDOWN_S = 0.20   # minimum time between NUDGE commands
+NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
@@ -196,6 +200,18 @@ DRIFT_ENABLED = True
 # Deterministic run seed (change only when you want a new reproducible pattern)
 DRIFT_RUN_SEED = 12345
 
+# Runtime run seed controls
+# True: include per-run runtime seed in drift randomness
+# False: ignore runtime seed and keep deterministic baseline by level
+DRIFT_USE_RUNTIME_SEED = True
+
+# Optional fixed runtime seed for reproducible debugging (None = random each run)
+DRIFT_FORCE_RUN_SEED = None
+
+# Runtime-populated by controller at run start
+DRIFT_RUNTIME_RUN_SEED = None
+DRIFT_RUNTIME_PARTICIPANT = ""
+
 # Baseline max XY drift in mm at 1x scale
 DRIFT_MAX_XY_MM = 5.0
 
@@ -204,6 +220,7 @@ DRIFT_MAX_XY_MM = 5.0
 # 1.0 = baseline
 # 2.0 = double drift
 DRIFT_SCALE = 1.35
+DRIFT_SCALE_DEFAULT = DRIFT_SCALE
 
 # Distribution mode
 # "uniform" = random within square bounds
@@ -215,4 +232,4 @@ DRIFT_MODE = "uniform"
 # "X"  -> drift only along X
 # "Y"  -> drift only along Y
 # "XY" -> drift along both axes (original behavior)
-DRIFT_AXIS_MODE = "X"
+DRIFT_AXIS_MODE = "XY"

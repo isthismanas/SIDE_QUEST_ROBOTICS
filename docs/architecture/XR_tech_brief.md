@@ -2,7 +2,7 @@ XR Technical Brief (v5)
 
 Project: Side Quest: The Leaning Tower of Regolith (ARC 2026) Target
 Sub-Team: XR 
-Last Updated: 26 Feb 2026 (Aligned with Robotics Dev 12 – Tolerance + Combo Active)
+Last Updated: 6 Mar 2026 (Dev 24 – UI Feedback Layer)
 
 ================================================================
 
@@ -189,11 +189,27 @@ Characteristics:
 XR renders classification only.
 XR does not compute classification.
 
+6.5 Dev Update – UI Feedback Layer (Dev 24)
+
+- Added `XRUIButtonFeedback` to centralize UI feedback (press animation + audio + haptics).
+- Added scale-based press animation with auto-release for XR UI button presses.
+- Centralized playback through `UIAudioPlayer` and `UIHapticPlayer`; `START` and `DROP` use primary click.
+- Removed per-button legacy `AudioSource` usage and routed button feedback via `XRUIButtonFeedback`.
+- Standardized button `OnClick()` to logic-only calls (`XRUIStateManager` / command methods).
+- Verified XR Interaction Toolkit button tint hover/press feedback remains functional.
+
+Architecture note: UI feedback (audio/haptics/press animation) is now handled by `XRUIButtonFeedback`; UI logic scripts (`XRUIStateManager`, `TogglableReceiver`, etc.) no longer handle feedback directly.
+
 ================================================================
 
 7. Current Development Status (Dev 12)
 
 Completed:
+
+Dev 24 UI update:
+
+• XR UI interaction feedback stack centralized in `XRUIButtonFeedback` (audio, haptics, press animation)
+• UI logic handlers now remain logic-only (no direct feedback playback)
 
 • Stable dual-camera stereo stream
 • Hardware-encoded JPEG pipeline

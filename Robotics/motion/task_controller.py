@@ -1,5 +1,6 @@
 import time, socket, struct, os, threading, json, sys
 import warnings
+import secrets
 from datetime import timedelta
 import hashlib
 from uuid import uuid4
@@ -14,7 +15,7 @@ import tolerance_engine
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE  # NEW: RS485 Modbus gripper driver
 import robot_config as cfg
-from logger import info, warn
+from logger import info, warn, error
 
 # --- Add perception module ---
 PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
@@ -31,7 +32,8 @@ if VISION_MODE_ENABLED or CAMERA_STREAM_ENABLED:
 PERC_AVAILABLE = False
 perc_engine = None
 if not VISION_MODE_ENABLED:
-    info("PERC", "PERC bypassed (deterministic mode)")
+    if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+        info("PERC", "PERC bypassed (deterministic mode)")
 else:
     try:
         perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
@@ -39,13 +41,15 @@ else:
             sys.path.append(perc_path)
         from perception_engine import engine as perc_engine  # type: ignore[reportMissingImports]
         PERC_AVAILABLE = True
-        info("PERC", "Perception module enabled")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("PERC", "Perception module enabled")
     except Exception as e:
         warn("PERC", f"Perception module disabled: {e}")
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-info("CONTROL", f"USING ACTIONS FROM: {actions.__file__}")
+if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+    info("CONTROL", f"USING ACTIONS FROM: {actions.__file__}")
 
 
 # --- 0. STABILITY & PORT CONFIG ---
@@ -117,6 +121,13 @@ _unity_command_conn = None
 _last_sent_zone = None
 run_id = None
 run_finalized = False
+_logged_raw_getpose_probe = False
+current_run_seed = None
+DEBUG_ENABLED = bool(getattr(cfg, "DEBUG_ENABLED", False))
+CONSOLE_QUIET = not DEBUG_ENABLED
+_DEFAULT_LOG_MODULE_LEVELS = dict(getattr(cfg, "LOG_MODULES", {}))
+_last_ready_level_printed = None
+QUIET_ALLOWLIST = {"PROMPT", "SUMMARY", "FAULT", "ERROR", "FATAL"}
 LEADERBOARD_MODE = "DEV"
 OFFICIAL_EVENT_ID = "ARC2026"
 
@@ -233,6 +244,83 @@ def emit_run_summary(reason: str) -> float:
 
 def _normalize_leaderboard_mode(value) -> str:
     return "OFFICIAL" if str(value).strip().upper() == "OFFICIAL" else "DEV"
+
+
+def _is_official_mode() -> bool:
+    return _normalize_leaderboard_mode(LEADERBOARD_MODE) == "OFFICIAL"
+
+
+def _is_debug_enabled() -> bool:
+    return bool(DEBUG_ENABLED)
+
+
+def _is_console_quiet() -> bool:
+    return bool(CONSOLE_QUIET)
+
+
+def _apply_console_verbosity() -> None:
+    if not isinstance(getattr(cfg, "LOG_MODULES", None), dict):
+        return
+
+    if _is_console_quiet():
+        for key in list(cfg.LOG_MODULES.keys()):
+            cfg.LOG_MODULES[key] = "WARN"
+    else:
+        for key, value in _DEFAULT_LOG_MODULE_LEVELS.items():
+            cfg.LOG_MODULES[key] = value
+
+
+def console_emit(
+    message: str,
+    tag: str,
+    level: str,
+    module: str = "CONTROL",
+    allow_in_quiet: bool = False,
+) -> None:
+    tag_u = str(tag).strip().upper()
+    level_u = str(level).strip().upper()
+
+    if _is_console_quiet():
+        allow = (level_u in {"WARN", "ERROR", "FATAL"}) or (tag_u in QUIET_ALLOWLIST) or (allow_in_quiet and tag_u in QUIET_ALLOWLIST)
+        if not allow:
+            return
+        print(f"[{module}] {message}")
+        return
+
+    if level_u in {"ERROR", "FATAL"}:
+        error(module, message)
+    elif level_u in {"WARN", "WARNING"}:
+        warn(module, message)
+    else:
+        info(module, message)
+
+
+def console_info(module: str, message: str, essential: bool = False) -> None:
+    console_emit(
+        message=message,
+        tag="PROMPT" if essential else "INFO",
+        level="INFO",
+        module=module,
+        allow_in_quiet=essential,
+    )
+
+
+def _emit_ready_prompt(level) -> None:
+    global _last_ready_level_printed
+    if _is_console_quiet():
+        return
+    if level == _last_ready_level_printed:
+        return
+    _last_ready_level_printed = level
+    console_info("CONTROL", f"READY: waiting for DROP/FIX (stack_level={level})", essential=True)
+
+
+def _set_debug_enabled(enabled: bool) -> None:
+    global DEBUG_ENABLED, CONSOLE_QUIET
+    DEBUG_ENABLED = bool(enabled)
+    CONSOLE_QUIET = not DEBUG_ENABLED
+    cfg.DEBUG_ENABLED = DEBUG_ENABLED
+    _apply_console_verbosity()
 
 
 def _current_log_subdir() -> str:
@@ -698,6 +786,7 @@ def leaderboard_http_server() -> None:
 
 
 _load_leaderboard_mode()
+_apply_console_verbosity()
 
 
 # --- SIGNIFIER: prove which file is running ---
@@ -772,7 +861,7 @@ def camera_server(mxid, port, label):
     perc_started = False
     try:
         with dai.Device(pipeline, dai.DeviceInfo(mxid)) as device:
-            if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
+            if _is_official_mode():
                 try:
                     device.setLogLevel(dai.LogLevel.CRITICAL)
                 except Exception:
@@ -829,7 +918,7 @@ def camera_server(mxid, port, label):
                     raise
                 _track_client_socket(conn)
                 conn.settimeout(1.0)
-                warn("CAM", f"[{label}] Unity connected from {addr}")
+                console_emit(f"[{label}] Unity connected from {addr}", tag="UNITY", level="INFO", module="CAM", allow_in_quiet=True)
                 try:
                     while not STOP_EVENT.is_set():
                         group = q.get()
@@ -842,14 +931,13 @@ def camera_server(mxid, port, label):
                 except Exception as e:
                     # Typical when Unity stops play mode / reconnects
                     if not STOP_EVENT.is_set():
-                        if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+                        if _is_debug_enabled():
                             warn("CAM", f"[{label}] Client stream ended: {e}")
                 finally:
                     _close_socket_quietly(conn)
                     _untrack_client_socket(conn)
                     if not STOP_EVENT.is_set():
-                        if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
-                            warn("CAM", f"[{label}] Unity disconnected.")
+                        console_emit(f"[{label}] Unity disconnected.", tag="UNITY", level="INFO", module="CAM", allow_in_quiet=True)
     except Exception as e:
         if not STOP_EVENT.is_set():
             warn("CAM", f"[{label}] Error: {e}")
@@ -905,6 +993,20 @@ def send_nack(cmd: str, reason: str) -> bool:
     return _send_line_to_unity(f"NACK {cmd} {reason}")
 
 
+def _reset_drift_scale_for_run(boundary: str) -> None:
+    default_scale = float(getattr(cfg, "DRIFT_SCALE_DEFAULT", getattr(cfg, "DRIFT_SCALE", 1.0)))
+    cfg.DRIFT_SCALE = default_scale
+    if _is_debug_enabled():
+        info("DRIFT", f"[RUN] DRIFT_SCALE reset to {cfg.DRIFT_SCALE:.3f} boundary={boundary}")
+
+
+def _generate_runtime_run_seed() -> int:
+    forced_seed = getattr(cfg, "DRIFT_FORCE_RUN_SEED", None)
+    if forced_seed is not None:
+        return int(forced_seed)
+    return int(secrets.randbits(64))
+
+
 def _push_zone_if_needed(force: bool = False) -> None:
     global _last_sent_zone
     if _unity_command_conn is None:
@@ -925,7 +1027,7 @@ def _handle_post_tower_hover(module: str, my_token) -> bool:
     if m in (9, 11):
         if my_token != current_session_token:
             return False
-        warn(module, f"[FAULT] RobotMode={m} -> entering FAULT")
+        console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
         fault_result = step(STATE, Event.FAULT)
         if fault_result.allowed:
             STATE = fault_result.next_state
@@ -941,22 +1043,85 @@ def _handle_post_tower_hover(module: str, my_token) -> bool:
         if STATE == State.WAITING_FOR_DECISION:
             drop_committed_this_window = False
             decision_seq += 1
-            _send_line_to_unity(f"DECISION_READY {decision_seq}")
             if current_stack_level is not None and current_stack_level >= 0:
                 base_place = cfg.tower_place_pose(current_stack_level)
-                proposed_place_pose = drift_engine.inject_drift(base_place, current_stack_level)
-                proposed_place_stack_level = current_stack_level
-                current_zone = tolerance_engine.classify_pose(proposed_place_pose)
+                if proposed_place_pose is None or proposed_place_stack_level != current_stack_level:
+                    proposed_place_pose = drift_engine.inject_drift(
+                        base_place,
+                        current_stack_level,
+                        run_seed=current_run_seed,
+                        participant=participant_name,
+                    )
+                    proposed_place_stack_level = current_stack_level
+                    log_event(
+                        "EVENT_DRIFT_LEVEL",
+                        source="INTERNAL",
+                        stack_level=current_stack_level,
+                        drift_dx_mm=round(proposed_place_pose[0] - base_place[0], 3),
+                        drift_dy_mm=round(proposed_place_pose[1] - base_place[1], 3),
+                        runtime_run_seed=current_run_seed,
+                        drift_run_seed_baseline=int(getattr(cfg, "DRIFT_RUN_SEED", 0)),
+                    )
+                ex = proposed_place_pose[0] - base_place[0]
+                ey = proposed_place_pose[1] - base_place[1]
+
+                tcp_before = handles.robot.get_tcp_pose()
+                tcp_after = handles.robot.get_tcp_pose()
+
+                if tcp_after is not None:
+                    measured_pose = (
+                        tcp_after[0],
+                        tcp_after[1],
+                        proposed_place_pose[2],
+                        proposed_place_pose[3],
+                        proposed_place_pose[4],
+                        proposed_place_pose[5],
+                    )
+                    current_zone = tolerance_engine.classify_pose(
+                        measured_pose,
+                        center_xy=(base_place[0], base_place[1]),
+                    )
+                else:
+                    current_zone = tolerance_engine.classify_pose(
+                        proposed_place_pose,
+                        center_xy=(base_place[0], base_place[1]),
+                    )
+
+                tcp_before_x = tcp_before[0] if tcp_before is not None else float("nan")
+                tcp_before_y = tcp_before[1] if tcp_before is not None else float("nan")
+                tcp_after_x = tcp_after[0] if tcp_after is not None else float("nan")
+                tcp_after_y = tcp_after[1] if tcp_after is not None else float("nan")
+                if _is_debug_enabled():
+                    info(
+                        "CONTROL",
+                        f"[ZONE_INIT] lvl={current_stack_level} nominal_xy=({base_place[0]:.2f},{base_place[1]:.2f}) "
+                        f"drift_xy=({ex:.2f},{ey:.2f}) proposed_xy=({proposed_place_pose[0]:.2f},{proposed_place_pose[1]:.2f}) "
+                        f"tcp_before=({tcp_before_x:.2f},{tcp_before_y:.2f}) tcp_after=({tcp_after_x:.2f},{tcp_after_y:.2f}) zone={current_zone}",
+                    )
+                    if tcp_after is not None:
+                        ex_tcp = tcp_after[0] - base_place[0]
+                        ey_tcp = tcp_after[1] - base_place[1]
+                        info(
+                            "CONTROL",
+                            f"[POSE] lvl={current_stack_level} tcp=({tcp_after[0]:.2f},{tcp_after[1]:.2f},{tcp_after[2]:.2f}) "
+                            f"err=({ex_tcp:.2f},{ey_tcp:.2f}) zone={current_zone}",
+                        )
+                    else:
+                        info(
+                            "CONTROL",
+                            f"[POSE] lvl={current_stack_level} tcp=(nan,nan,nan) err=(nan,nan) zone={current_zone}",
+                        )
                 current_zone_stack_level = current_stack_level
                 _push_zone_if_needed(force=True)
+                _send_line_to_unity(f"DECISION_READY {decision_seq}")
             else:
                 proposed_place_pose = None
                 proposed_place_stack_level = None
                 current_zone = "GREEN"
                 current_zone_stack_level = None
                 _push_zone_if_needed(force=True)
-            if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
-                info("CONTROL", f"READY: waiting for DROP/FIX (stack_level={current_stack_level})")
+                _send_line_to_unity(f"DECISION_READY {decision_seq}")
+            _emit_ready_prompt(current_stack_level)
             block_attempt_start_ts = time.time()
 
     return True
@@ -981,7 +1146,7 @@ def handle_command(cmd_str: str, source: str) -> None:
     global participant_name, session_id, tower_attempt_start_ts, run_start_time, block_attempt_start_ts, drop_committed_this_window, decision_seq, holding_block, current_session_token
     global proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active
-    global run_id, run_finalized
+    global run_id, run_finalized, current_run_seed, DEBUG_ENABLED, _last_ready_level_printed
     global LEADERBOARD_MODE, OFFICIAL_EVENT_ID
     global _last_nudge_t
 
@@ -990,8 +1155,8 @@ def handle_command(cmd_str: str, source: str) -> None:
         cmd_str = "DROP"
 
     module = _module_for_source(source)
-    if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
-        info(module, f"[{source}] Received: {cmd_str}   (STATE={STATE.name})  (ARMED={robot_armed})  (GRIPPER={gripper_connected})")
+    if _is_debug_enabled():
+        console_info(module, f"[{source}] Received: {cmd_str}   (STATE={STATE.name})  (ARMED={robot_armed})  (GRIPPER={gripper_connected})")
 
     # Raw session commands (before parse_event)
     upper_cmd = cmd_str.upper()
@@ -1021,9 +1186,14 @@ def handle_command(cmd_str: str, source: str) -> None:
         handles.combo_active = combo_active
         run_id = None
         run_finalized = False
+        current_run_seed = None
+        cfg.DRIFT_RUNTIME_RUN_SEED = None
+        cfg.DRIFT_RUNTIME_PARTICIPANT = participant_name
+        _last_ready_level_printed = None
+        _reset_drift_scale_for_run("NAME")
         _send_line_to_unity("NAME_SET")
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
-        info("CONTROL", f"Participant set: {participant_name}. Ready to START.")
+        console_info("CONTROL", f"Participant set: {participant_name}. Ready to START.", essential=True)
         return
 
     if upper_cmd == "TUMBLE":
@@ -1090,24 +1260,43 @@ def handle_command(cmd_str: str, source: str) -> None:
         handles.combo_active = combo_active
         run_id = None
         run_finalized = False
-        if getattr(cfg, "RUN_MODE", "DEBUG") == "COMP" and vr_connected:
-            print("Waiting for participant name...")
+        current_run_seed = None
+        cfg.DRIFT_RUNTIME_RUN_SEED = None
+        cfg.DRIFT_RUNTIME_PARTICIPANT = ""
+        _last_ready_level_printed = None
+        if _is_official_mode() and vr_connected:
+            console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
         return
 
     if upper_cmd == "MODE SHOW":
-        info(module, f"[LEADERBOARD] MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}")
+        console_emit(f"[LEADERBOARD] MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
         return
 
     if upper_cmd == "MODE DEV":
         LEADERBOARD_MODE = "DEV"
         _save_leaderboard_mode()
-        info(module, f"[LEADERBOARD] MODE set to DEV (event_id={OFFICIAL_EVENT_ID})")
+        console_emit(f"[LEADERBOARD] MODE set to DEV (event_id={OFFICIAL_EVENT_ID})", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
         return
 
     if upper_cmd == "MODE OFFICIAL":
         LEADERBOARD_MODE = "OFFICIAL"
         _save_leaderboard_mode()
-        info(module, f"[LEADERBOARD] MODE set to OFFICIAL (event_id={OFFICIAL_EVENT_ID})")
+        console_emit(f"[LEADERBOARD] MODE set to OFFICIAL (event_id={OFFICIAL_EVENT_ID})", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
+        return
+
+    if upper_cmd == "DEBUG SHOW":
+        state = "ON" if _is_debug_enabled() else "OFF"
+        console_emit(f"[DEBUG] DEBUG={state}", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
+        return
+
+    if upper_cmd == "DEBUG ON":
+        _set_debug_enabled(True)
+        console_emit("[DEBUG] DEBUG=ON", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
+        return
+
+    if upper_cmd == "DEBUG OFF":
+        _set_debug_enabled(False)
+        console_emit("[DEBUG] DEBUG=OFF", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
         return
 
     if upper_cmd.startswith("EVENT "):
@@ -1290,7 +1479,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 # Immediate RobotMode check after motion
                 m = handles.robot.robot_mode()
                 if m in (9, 11):
-                    warn(module, f"[FAULT] RobotMode={m} -> entering FAULT")
+                    console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
                     fault_result = step(STATE, Event.FAULT)
                     if fault_result.allowed:
                         STATE = fault_result.next_state
@@ -1322,6 +1511,7 @@ def handle_command(cmd_str: str, source: str) -> None:
 
             # Run start timing (monotonic) when a new run actually begins
             if current_stack_level == 0:
+                _last_ready_level_printed = None
                 current_session_token = uuid4()
                 tower_attempt_start_ts = time.monotonic()
                 run_start_time = tower_attempt_start_ts
@@ -1330,6 +1520,24 @@ def handle_command(cmd_str: str, source: str) -> None:
                 green_place_streak = 0
                 combo_active = False
                 handles.combo_active = combo_active
+                current_run_seed = _generate_runtime_run_seed()
+                cfg.DRIFT_RUNTIME_RUN_SEED = current_run_seed
+                cfg.DRIFT_RUNTIME_PARTICIPANT = participant_name or ""
+                _reset_drift_scale_for_run("START")
+                if _is_debug_enabled():
+                    info(
+                        "DRIFT",
+                        f"[RUN] START participant={participant_name or 'UNKNOWN'} RUN_SEED={current_run_seed}",
+                    )
+                log_event(
+                    "EVENT_RUN_START_METADATA",
+                    source=source,
+                    participant_name=participant_name,
+                    runtime_run_seed=current_run_seed,
+                    drift_run_seed_baseline=int(getattr(cfg, "DRIFT_RUN_SEED", 0)),
+                    drift_scale_default=float(getattr(cfg, "DRIFT_SCALE_DEFAULT", cfg.DRIFT_SCALE)),
+                    drift_scale_at_start=float(cfg.DRIFT_SCALE),
+                )
 
             if event == Event.START_STACK:
                 send_ack("START")
@@ -1348,7 +1556,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
             if m in (9, 11):
-                warn(module, f"[FAULT] RobotMode={m} -> entering FAULT")
+                console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
                 fault_result = step(STATE, Event.FAULT)
                 if fault_result.allowed:
                     STATE = fault_result.next_state
@@ -1365,8 +1573,29 @@ def handle_command(cmd_str: str, source: str) -> None:
 
                 # Immediately move to tower hover
                 if STATE == State.MOVING_TO_TOWER_HOVER:
+                    base_place = cfg.tower_place_pose(current_stack_level)
+                    proposed_place_pose = drift_engine.inject_drift(
+                        base_place,
+                        current_stack_level,
+                        run_seed=current_run_seed,
+                        participant=participant_name,
+                    )
+                    proposed_place_stack_level = current_stack_level
+                    log_event(
+                        "EVENT_DRIFT_LEVEL",
+                        source=source,
+                        stack_level=current_stack_level,
+                        drift_dx_mm=round(proposed_place_pose[0] - base_place[0], 3),
+                        drift_dy_mm=round(proposed_place_pose[1] - base_place[1], 3),
+                        runtime_run_seed=current_run_seed,
+                        drift_run_seed_baseline=int(getattr(cfg, "DRIFT_RUN_SEED", 0)),
+                    )
                     handles.combo_active = combo_active
-                    actions.move_to_tower_hover(handles, current_stack_level)
+                    actions.move_to_tower_hover(
+                        handles,
+                        current_stack_level,
+                        target_xy=(proposed_place_pose[0], proposed_place_pose[1]),
+                    )
                     if not _handle_post_tower_hover(module, my_token):
                         return
         finally:
@@ -1385,29 +1614,115 @@ def handle_command(cmd_str: str, source: str) -> None:
         now = time.time()
         cooldown_s = getattr(cfg, "NUDGE_COOLDOWN_S", 0.20)
         if (now - _last_nudge_t) < cooldown_s:
-            if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+            if _is_debug_enabled():
                 info(module, f"[GATE] NUDGE_XY ignored: cooldown ({cooldown_s:.2f}s)")
             return
         _last_nudge_t = now
         controller_busy = True
         try:
-            actions.do_nudge_xy(handles, payload["dx"], payload["dy"])
+            requested_dx = float(payload["dx"])
+            requested_dy = float(payload["dy"])
+
+            max_offset_mm = float(getattr(cfg, "NUDGE_MAX_OFFSET_MM", 10.0))
+            nominal_place_pose = cfg.tower_place_pose(current_stack_level)
+
             if proposed_place_pose is not None and proposed_place_stack_level == current_stack_level:
+                current_pose_for_clamp = proposed_place_pose
+            else:
+                current_pose_for_clamp = nominal_place_pose
+
+            current_offset_x = current_pose_for_clamp[0] - nominal_place_pose[0]
+            current_offset_y = current_pose_for_clamp[1] - nominal_place_pose[1]
+
+            target_offset_x = current_offset_x + requested_dx
+            target_offset_y = current_offset_y + requested_dy
+
+            clamped_target_offset_x = max(-max_offset_mm, min(max_offset_mm, target_offset_x))
+            clamped_target_offset_y = max(-max_offset_mm, min(max_offset_mm, target_offset_y))
+
+            applied_dx = clamped_target_offset_x - current_offset_x
+            applied_dy = clamped_target_offset_y - current_offset_y
+
+            if _is_debug_enabled() and (applied_dx != requested_dx or applied_dy != requested_dy):
+                warn(
+                    module,
+                    f"[GATE] NUDGE_XY clamped: req=({requested_dx:.3f},{requested_dy:.3f}) "
+                    f"applied=({applied_dx:.3f},{applied_dy:.3f}) max=±{max_offset_mm:.1f}mm",
+                )
+
+            actions.do_nudge_xy(handles, applied_dx, applied_dy)
+            if proposed_place_pose is not None and proposed_place_stack_level == current_stack_level:
+                before_x = proposed_place_pose[0]
+                before_y = proposed_place_pose[1]
                 proposed_place_pose = (
-                    proposed_place_pose[0] + payload["dx"],
-                    proposed_place_pose[1] + payload["dy"],
+                    proposed_place_pose[0] + applied_dx,
+                    proposed_place_pose[1] + applied_dy,
                     proposed_place_pose[2],
                     proposed_place_pose[3],
                     proposed_place_pose[4],
                     proposed_place_pose[5],
                 )
-                current_zone = tolerance_engine.classify_pose(proposed_place_pose)
+            else:
+                before_x = nominal_place_pose[0]
+                before_y = nominal_place_pose[1]
+                proposed_place_pose = (
+                    nominal_place_pose[0] + applied_dx,
+                    nominal_place_pose[1] + applied_dy,
+                    nominal_place_pose[2],
+                    nominal_place_pose[3],
+                    nominal_place_pose[4],
+                    nominal_place_pose[5],
+                )
+                proposed_place_stack_level = current_stack_level
+
+            if proposed_place_pose is not None and proposed_place_stack_level == current_stack_level:
+                tcp_pose = handles.robot.get_tcp_pose()
+                if tcp_pose is not None:
+                    measured_pose = (
+                        tcp_pose[0],
+                        tcp_pose[1],
+                        proposed_place_pose[2],
+                        proposed_place_pose[3],
+                        proposed_place_pose[4],
+                        proposed_place_pose[5],
+                    )
+                    current_zone = tolerance_engine.classify_pose(
+                        measured_pose,
+                        center_xy=(nominal_place_pose[0], nominal_place_pose[1]),
+                    )
+                else:
+                    current_zone = tolerance_engine.classify_pose(
+                        proposed_place_pose,
+                        center_xy=(nominal_place_pose[0], nominal_place_pose[1]),
+                    )
+                ex = proposed_place_pose[0] - nominal_place_pose[0]
+                ey = proposed_place_pose[1] - nominal_place_pose[1]
+                if _is_debug_enabled():
+                    info(
+                        "CONTROL",
+                        f"[NUDGE] lvl={current_stack_level} req=({requested_dx:.2f},{requested_dy:.2f}) "
+                        f"appl=({applied_dx:.2f},{applied_dy:.2f}) before=({before_x:.2f},{before_y:.2f}) "
+                        f"after=({proposed_place_pose[0]:.2f},{proposed_place_pose[1]:.2f}) err=({ex:.2f},{ey:.2f}) zone={current_zone}",
+                    )
+                    if tcp_pose is not None:
+                        ex_tcp = tcp_pose[0] - nominal_place_pose[0]
+                        ey_tcp = tcp_pose[1] - nominal_place_pose[1]
+                        info(
+                            "CONTROL",
+                            f"[POSE] lvl={current_stack_level} tcp=({tcp_pose[0]:.2f},{tcp_pose[1]:.2f},{tcp_pose[2]:.2f}) "
+                            f"err=({ex_tcp:.2f},{ey_tcp:.2f}) zone={current_zone}",
+                        )
+                    else:
+                        info(
+                            "CONTROL",
+                            f"[POSE] lvl={current_stack_level} tcp=(nan,nan,nan) err=(nan,nan) zone={current_zone}",
+                        )
                 current_zone_stack_level = current_stack_level
                 _push_zone_if_needed(force=False)
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
             if m in (9, 11):
-                warn(module, f"[FAULT] RobotMode={m} -> entering FAULT")
+                console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
                 fault_result = step(STATE, Event.FAULT)
                 if fault_result.allowed:
                     STATE = fault_result.next_state
@@ -1424,7 +1739,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         now = time.time()
         cooldown_s = getattr(cfg, "NUDGE_COOLDOWN_S", 0.20)
         if (now - _last_nudge_t) < cooldown_s:
-            if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+            if _is_debug_enabled():
                 info(module, f"[GATE] NUDGE_YAW ignored: cooldown ({cooldown_s:.2f}s)")
             return
         _last_nudge_t = now
@@ -1440,13 +1755,40 @@ def handle_command(cmd_str: str, source: str) -> None:
                     proposed_place_pose[4],
                     proposed_place_pose[5] + payload["dtheta"],
                 )
-                current_zone = tolerance_engine.classify_pose(proposed_place_pose)
+                nominal_place_pose = cfg.tower_place_pose(current_stack_level)
+                tcp_pose = handles.robot.get_tcp_pose()
+                if tcp_pose is not None:
+                    measured_pose = (
+                        tcp_pose[0],
+                        tcp_pose[1],
+                        proposed_place_pose[2],
+                        proposed_place_pose[3],
+                        proposed_place_pose[4],
+                        proposed_place_pose[5],
+                    )
+                    current_zone = tolerance_engine.classify_pose(
+                        measured_pose,
+                        center_xy=(nominal_place_pose[0], nominal_place_pose[1]),
+                    )
+                else:
+                    current_zone = tolerance_engine.classify_pose(
+                        proposed_place_pose,
+                        center_xy=(nominal_place_pose[0], nominal_place_pose[1]),
+                    )
+                ex = proposed_place_pose[0] - nominal_place_pose[0]
+                ey = proposed_place_pose[1] - nominal_place_pose[1]
+                if _is_debug_enabled():
+                    info(
+                        "CONTROL",
+                        f"[NUDGE_YAW] lvl={current_stack_level} yaw={payload['dtheta']:.2f} "
+                        f"proposed=({proposed_place_pose[0]:.2f},{proposed_place_pose[1]:.2f}) err=({ex:.2f},{ey:.2f}) zone={current_zone}",
+                    )
                 current_zone_stack_level = current_stack_level
                 _push_zone_if_needed(force=False)
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
             if m in (9, 11):
-                warn(module, f"[FAULT] RobotMode={m} -> entering FAULT")
+                console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
                 fault_result = step(STATE, Event.FAULT)
                 if fault_result.allowed:
                     STATE = fault_result.next_state
@@ -1473,6 +1815,23 @@ def handle_command(cmd_str: str, source: str) -> None:
             send_ack("DROP")
             my_token = current_session_token
             zone_at_commit = "UNKNOWN"
+            if current_stack_level is not None and current_stack_level >= 0:
+                nominal_place_pose = cfg.tower_place_pose(current_stack_level)
+                tcp_pose = handles.robot.get_tcp_pose()
+                if _is_debug_enabled():
+                    if tcp_pose is not None:
+                        ex_tcp = tcp_pose[0] - nominal_place_pose[0]
+                        ey_tcp = tcp_pose[1] - nominal_place_pose[1]
+                        info(
+                            "CONTROL",
+                            f"[POSE] lvl={current_stack_level} tcp=({tcp_pose[0]:.2f},{tcp_pose[1]:.2f},{tcp_pose[2]:.2f}) "
+                            f"err=({ex_tcp:.2f},{ey_tcp:.2f}) zone={current_zone}",
+                        )
+                    else:
+                        info(
+                            "CONTROL",
+                            f"[POSE] lvl={current_stack_level} tcp=(nan,nan,nan) err=(nan,nan) zone={current_zone}",
+                        )
             # Attempt placement with error handling
             try:
                 handles.combo_active = combo_active
@@ -1497,7 +1856,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         combo_active = False
                         handles.combo_active = combo_active
                         warn("COMBO", "combo ended")
-                    warn(module, f"[FAULT] RobotMode={m} -> entering FAULT")
+                    console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
                     fault_result = step(STATE, Event.FAULT)
                     if fault_result.allowed:
                         STATE = fault_result.next_state
@@ -1507,7 +1866,11 @@ def handle_command(cmd_str: str, source: str) -> None:
                 if current_zone_stack_level == current_stack_level:
                     zone_at_commit = current_zone
                 elif proposed_place_pose is not None:
-                    zone_at_commit = tolerance_engine.classify_pose(proposed_place_pose)
+                    nominal_place_pose = cfg.tower_place_pose(current_stack_level)
+                    zone_at_commit = tolerance_engine.classify_pose(
+                        proposed_place_pose,
+                        center_xy=(nominal_place_pose[0], nominal_place_pose[1]),
+                    )
 
                 if getattr(cfg, "COMBO_ENABLED", True):
                     if zone_at_commit == "GREEN":
@@ -1574,7 +1937,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     finalize_run("COMPLETE")
                     _send_line_to_unity(f"RUN_COMPLETE {current_stack_level}")
                     time.sleep(5.0)
-                    info(module, "[STACK] COMPLETE summary emitted (post-wait)")
+                    console_emit("[STACK] COMPLETE summary emitted (post-wait)", tag="SUMMARY", level="INFO", module=module, allow_in_quiet=True)
 
                     current_pick_index = 0
                     current_stack_level = 0
@@ -1586,6 +1949,10 @@ def handle_command(cmd_str: str, source: str) -> None:
                     tower_attempt_start_ts = None
                     run_start_time = None
                     participant_name = None
+                    current_run_seed = None
+                    cfg.DRIFT_RUNTIME_RUN_SEED = None
+                    cfg.DRIFT_RUNTIME_PARTICIPANT = ""
+                    _last_ready_level_printed = None
                     return
 
                 # Auto-continue stacking if enabled and targets remain
@@ -1612,7 +1979,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         # Immediate RobotMode check after motion (auto-continue)
                         m = handles.robot.robot_mode()
                         if m in (9, 11):
-                            warn(module, f"[FAULT] RobotMode={m} -> entering FAULT")
+                            console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
                             fault_result = step(STATE, Event.FAULT)
                             if fault_result.allowed:
                                 STATE = fault_result.next_state
@@ -1624,8 +1991,29 @@ def handle_command(cmd_str: str, source: str) -> None:
                         if result2.allowed:
                             STATE = result2.next_state
                             if STATE == State.MOVING_TO_TOWER_HOVER:
+                                base_place = cfg.tower_place_pose(current_stack_level)
+                                proposed_place_pose = drift_engine.inject_drift(
+                                    base_place,
+                                    current_stack_level,
+                                    run_seed=current_run_seed,
+                                    participant=participant_name,
+                                )
+                                proposed_place_stack_level = current_stack_level
+                                log_event(
+                                    "EVENT_DRIFT_LEVEL",
+                                    source="AUTO",
+                                    stack_level=current_stack_level,
+                                    drift_dx_mm=round(proposed_place_pose[0] - base_place[0], 3),
+                                    drift_dy_mm=round(proposed_place_pose[1] - base_place[1], 3),
+                                    runtime_run_seed=current_run_seed,
+                                    drift_run_seed_baseline=int(getattr(cfg, "DRIFT_RUN_SEED", 0)),
+                                )
                                 handles.combo_active = combo_active
-                                actions.move_to_tower_hover(handles, current_stack_level)
+                                actions.move_to_tower_hover(
+                                    handles,
+                                    current_stack_level,
+                                    target_xy=(proposed_place_pose[0], proposed_place_pose[1]),
+                                )
                                 if not _handle_post_tower_hover(module, my_token):
                                     return
                 else:
@@ -1687,7 +2075,8 @@ def command_server():
     global _unity_command_conn, _last_sent_zone
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
     global green_place_streak, combo_active
-    global run_id, run_finalized
+    global run_id, run_finalized, current_run_seed
+    global _logged_raw_getpose_probe
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1715,7 +2104,7 @@ def command_server():
             _unity_command_conn = conn
             _last_sent_zone = None
             vr_connected = True
-            info("CONTROL", f"[CONTROL] VR Connected: {addr}")
+            console_emit(f"[CONTROL] VR Connected: {addr}", tag="UNITY", level="INFO", module="CONTROL", allow_in_quiet=True)
 
             # Reset state machine for new session
             STATE = State.IDLE
@@ -1732,13 +2121,26 @@ def command_server():
             handles.combo_active = combo_active
             run_id = None
             run_finalized = False
+            current_run_seed = None
+            cfg.DRIFT_RUNTIME_RUN_SEED = None
+            cfg.DRIFT_RUNTIME_PARTICIPANT = ""
 
             # Arm once for this VR session
             try:
                 actions.arm_robot_once(handles)
                 robot_armed = True
-                if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
-                    print("Waiting for participant name...")
+                if not _logged_raw_getpose_probe:
+                    try:
+                        raw_pose_resp = handles.robot.send("GetPose()")
+                        if _is_debug_enabled():
+                            info("CONTROL", f"[POSE_RAW] GetPose() -> {raw_pose_resp}")
+                    except Exception as e:
+                        if _is_debug_enabled():
+                            warn("CONTROL", f"[POSE_RAW] GetPose() probe failed: {e}")
+                    finally:
+                        _logged_raw_getpose_probe = True
+                if _is_official_mode():
+                    console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
             except Exception as e:
                 robot_armed = False
                 warn("CONTROL", f"[CONTROL] Robot arm FAILED: {e}")
@@ -1796,8 +2198,7 @@ def command_server():
 
                 robot_armed = False
                 STATE = State.IDLE
-                if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
-                    warn("CONTROL", "[CONTROL] VR disconnected. Robot disarmed. STATE reset to IDLE.")
+                console_emit("[CONTROL] VR disconnected. Robot disarmed. STATE reset to IDLE.", tag="UNITY", level="INFO", module="CONTROL", allow_in_quiet=True)
 
                 # Keep the gripper connection status conservative:
                 # If Unity reconnects, we'll re-attempt connect.
@@ -1807,6 +2208,9 @@ def command_server():
                 proposed_place_stack_level = None
                 current_zone = "GREEN"
                 current_zone_stack_level = None
+                current_run_seed = None
+                cfg.DRIFT_RUNTIME_RUN_SEED = None
+                cfg.DRIFT_RUNTIME_PARTICIPANT = ""
     finally:
         _close_socket_quietly(server)
         _untrack_server_socket(server)
@@ -1888,11 +2292,11 @@ def facilitator_hotkey_loop():
     Facilitator keyboard hotkeys from stdin.
     Runs in a daemon thread and dispatches commands via handle_command(..., "FACILITATOR").
     """
-    if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+    if _is_debug_enabled():
         info("CONTROL", "[FACILITATOR] Console ready: t|tumble, r|recover, n <name>|name <name>, h|help")
     while not STOP_EVENT.is_set():
         try:
-            if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+            if _is_debug_enabled():
                 raw = input("FACILITATOR> ")
             else:
                 raw = input()
@@ -1916,6 +2320,9 @@ def facilitator_hotkey_loop():
                 info("CONTROL", "  mode dev             -> MODE DEV")
                 info("CONTROL", "  mode official        -> MODE OFFICIAL")
                 info("CONTROL", "  event <id>           -> EVENT <id>")
+                info("CONTROL", "  debug show           -> DEBUG SHOW")
+                info("CONTROL", "  debug on             -> DEBUG ON")
+                info("CONTROL", "  debug off            -> DEBUG OFF")
                 info("CONTROL", "  h | help             -> this help")
                 continue
 
@@ -1945,6 +2352,20 @@ def facilitator_hotkey_loop():
                 else:
                     warn("CONTROL", "[FACILITATOR] Usage: mode show|dev|official")
                     continue
+            elif len(lowered_tokens) >= 2 and lowered_tokens[0] == "debug":
+                debug_arg = lowered_tokens[1]
+                if debug_arg == "show":
+                    cmd = "DEBUG SHOW"
+                    facilitator_mode_cmd = "DEBUG_SHOW"
+                elif debug_arg == "on":
+                    cmd = "DEBUG ON"
+                    facilitator_mode_cmd = "DEBUG_ON"
+                elif debug_arg == "off":
+                    cmd = "DEBUG OFF"
+                    facilitator_mode_cmd = "DEBUG_OFF"
+                else:
+                    warn("CONTROL", "[FACILITATOR] Usage: debug show|on|off")
+                    continue
             elif head == "event":
                 event_id = tail
                 if not event_id:
@@ -1961,38 +2382,29 @@ def facilitator_hotkey_loop():
 
                 if facilitator_mode_cmd is not None:
                     if facilitator_mode_cmd == "MODE_SHOW":
-                        ack = f"MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}"
-                        print(ack)
-                        info("CONTROL", f"[FACILITATOR] {ack}")
+                        pass
                     elif facilitator_mode_cmd == "MODE_DEV":
-                        ack = f"MODE set to DEV (event_id={OFFICIAL_EVENT_ID})"
-                        show = f"MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}"
-                        print(ack)
-                        print(show)
-                        info("CONTROL", f"[FACILITATOR] {ack}")
-                        info("CONTROL", f"[FACILITATOR] {show}")
+                        pass
                     elif facilitator_mode_cmd == "MODE_OFFICIAL":
-                        ack = f"MODE set to OFFICIAL (event_id={OFFICIAL_EVENT_ID})"
-                        show = f"MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}"
-                        print(ack)
-                        print(show)
-                        info("CONTROL", f"[FACILITATOR] {ack}")
-                        info("CONTROL", f"[FACILITATOR] {show}")
+                        pass
                     elif facilitator_mode_cmd == "EVENT_SET":
                         ack = f"EVENT set to {OFFICIAL_EVENT_ID} (MODE={LEADERBOARD_MODE})"
                         show = f"MODE={LEADERBOARD_MODE} EVENT={OFFICIAL_EVENT_ID}"
-                        print(ack)
-                        print(show)
-                        info("CONTROL", f"[FACILITATOR] {ack}")
-                        info("CONTROL", f"[FACILITATOR] {show}")
+                        console_emit(f"[FACILITATOR] {ack}", tag="FACILITATOR", level="INFO", module="CONTROL")
+                        console_emit(f"[FACILITATOR] {show}", tag="FACILITATOR", level="INFO", module="CONTROL")
+                    elif facilitator_mode_cmd == "DEBUG_SHOW":
+                        pass
+                    elif facilitator_mode_cmd == "DEBUG_ON":
+                        pass
+                    elif facilitator_mode_cmd == "DEBUG_OFF":
+                        pass
                 else:
                     upper_cmd = cmd.upper()
                     if upper_cmd == "TUMBLE" or upper_cmd.startswith("NAME "):
                         pass
                     else:
                         ack = f"OK: {cmd}"
-                        print(ack)
-                        info("CONTROL", f"[FACILITATOR] {ack}")
+                        console_emit(f"[FACILITATOR] {ack}", tag="FACILITATOR", level="INFO", module="CONTROL")
             except Exception as e:
                 warn("CONTROL", f"[FACILITATOR] Command error: {e}")
         except EOFError:
@@ -2015,8 +2427,8 @@ if CAMERA_STREAM_ENABLED and (dai is not None):
     _start_worker_thread("camera-inspector", camera_server, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
     time.sleep(10)
     _start_worker_thread("camera-site-manager", camera_server, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
-if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
-    print("Start Unity and press Play...")
+if _is_official_mode():
+    console_emit("Start Unity and press Play...", tag="UNITY", level="INFO", module="CONTROL", allow_in_quiet=True)
 _start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)
 
 info("CONTROL", "TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
@@ -2030,16 +2442,16 @@ except KeyboardInterrupt:
     alive_threads = _join_worker_threads(timeout_s=1.0)
 
     if alive_threads:
-        if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+        if _is_debug_enabled():
             warn("CONTROL", f"[MAIN] Threads still alive after join timeout: {alive_threads}")
         cleanup_errors.append(RuntimeError("Worker threads still alive after shutdown timeout"))
 
     if cleanup_errors:
-        if getattr(cfg, "RUN_MODE", "DEBUG") == "DEBUG":
+        if _is_debug_enabled():
             warn("CONTROL", f"[MAIN] Shutdown encountered {len(cleanup_errors)} issue(s). Exiting with code 1.")
         sys.exit(1)
 
     info("CONTROL", "[MAIN] Shutdown complete.")
-    if getattr(cfg, "RUN_MODE", "COMP") == "COMP":
+    if _is_official_mode():
         os._exit(0)
     sys.exit(0)

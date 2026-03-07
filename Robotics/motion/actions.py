@@ -28,7 +28,7 @@ import robot_config as cfg
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE
 import drift_engine
-from logger import info, debug, warn
+from logger import info, debug, warn, error
 
 
 cfg_pose_type = tuple[float, float, float, float, float, float]
@@ -138,46 +138,54 @@ def recover_from_fault(handles: SystemHandles) -> bool:
         except Exception:
             return None
 
-    print("[RECOVERY] recover_from_fault: start")
+    if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+        info("STACK", "[RECOVERY] recover_from_fault: start")
 
     # Query initial mode (for logging)
     mode_before = _mode()
-    print(f"[RECOVERY] mode_before={mode_before}")
+    if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+        info("STACK", f"[RECOVERY] mode_before={mode_before}")
 
     # If robot is not in fault, run lightweight re-center and return OK
     if mode_before is not None and mode_before not in (9, 11):
         try:
             handles.robot.speed_factor(cfg.SPEED_PRECISION)
-            print(f"[RECOVERY] speed_factor={cfg.SPEED_PRECISION}")
+            if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+                info("STACK", f"[RECOVERY] speed_factor={cfg.SPEED_PRECISION}")
         except Exception as e:
-            print(f"[RECOVERY] speed_factor failed: {e}")
+            error("STACK", f"[RECOVERY] speed_factor failed: {e}")
         try:
             handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
             handles.robot.wait_until_idle()
-            print("[RECOVERY] moved to SAFE_HOME_POSE")
+            if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+                info("STACK", "[RECOVERY] moved to SAFE_HOME_POSE")
         except Exception as e:
-            print(f"[RECOVERY] movj failed: {e}")
+            error("STACK", f"[RECOVERY] movj failed: {e}")
             return False
         try:
             handles.gripper.open()
-            print("[RECOVERY] gripper opened")
+            if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+                info("STACK", "[RECOVERY] gripper opened")
         except Exception as e:
-            print(f"[RECOVERY] gripper open failed: {e}")
-        print("[RECOVERY] recover_from_fault: complete (idempotent)")
+            error("STACK", f"[RECOVERY] gripper open failed: {e}")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("STACK", "[RECOVERY] recover_from_fault: complete (idempotent)")
         return True
 
     # Otherwise, proceed with full recovery
     try:
         resp = handles.robot.clear_error()
-        print(f"[RECOVERY] clear_error -> {resp}")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("STACK", f"[RECOVERY] clear_error -> {resp}")
     except Exception as e:
-        print(f"[RECOVERY] clear_error failed: {e}")
+        error("STACK", f"[RECOVERY] clear_error failed: {e}")
 
     try:
         resp = handles.robot.enable()
-        print(f"[RECOVERY] enable -> {resp}")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("STACK", f"[RECOVERY] enable -> {resp}")
     except Exception as e:
-        print(f"[RECOVERY] enable failed: {e}")
+        error("STACK", f"[RECOVERY] enable failed: {e}")
 
     # Poll RobotMode up to 3s after ClearError + EnableRobot.
     # Fail only on hard fault (9/11). Any other valid mode (>=0) is recoverable.
@@ -190,9 +198,9 @@ def recover_from_fault(handles: SystemHandles) -> bool:
             time.sleep(0.25)
             continue
         if m in (9, 11):
-            print(f"[RECOVERY] mode_before={mode_before}")
-            print(f"[RECOVERY] mode_after={m}")
-            print("[RECOVERY] HARD FAULT detected during poll. Aborting.")
+            error("STACK", f"[RECOVERY] mode_before={mode_before}")
+            error("STACK", f"[RECOVERY] mode_after={m}")
+            error("STACK", "[RECOVERY] HARD FAULT detected during poll. Aborting.")
             return False
         if m >= 0:
             mode_after = m
@@ -200,36 +208,41 @@ def recover_from_fault(handles: SystemHandles) -> bool:
         time.sleep(0.25)
 
     if mode_after is None:
-        print(f"[RECOVERY] mode_before={mode_before}")
-        print(f"[RECOVERY] mode_after={mode_after}")
-        print("[RECOVERY] No valid RobotMode within timeout. Aborting.")
+        error("STACK", f"[RECOVERY] mode_before={mode_before}")
+        error("STACK", f"[RECOVERY] mode_after={mode_after}")
+        error("STACK", "[RECOVERY] No valid RobotMode within timeout. Aborting.")
         return False
 
-    print(f"[RECOVERY] mode_before={mode_before}")
-    print(f"[RECOVERY] mode_after={mode_after}")
+    if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+        info("STACK", f"[RECOVERY] mode_before={mode_before}")
+        info("STACK", f"[RECOVERY] mode_after={mode_after}")
 
     # Proceed with recovery motions
     try:
         handles.robot.speed_factor(cfg.SPEED_PRECISION)
-        print(f"[RECOVERY] speed_factor={cfg.SPEED_PRECISION}")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("STACK", f"[RECOVERY] speed_factor={cfg.SPEED_PRECISION}")
     except Exception as e:
-        print(f"[RECOVERY] speed_factor failed: {e}")
+        error("STACK", f"[RECOVERY] speed_factor failed: {e}")
 
     try:
         handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
         handles.robot.wait_until_idle()
-        print("[RECOVERY] moved to SAFE_HOME_POSE")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("STACK", "[RECOVERY] moved to SAFE_HOME_POSE")
     except Exception as e:
-        print(f"[RECOVERY] movj failed: {e}")
+        error("STACK", f"[RECOVERY] movj failed: {e}")
         return False
 
     try:
         handles.gripper.open()
-        print("[RECOVERY] gripper opened")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("STACK", "[RECOVERY] gripper opened")
     except Exception as e:
-        print(f"[RECOVERY] gripper open failed: {e}")
+        error("STACK", f"[RECOVERY] gripper open failed: {e}")
 
-    print("[RECOVERY] recover_from_fault: complete")
+    if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+        info("STACK", "[RECOVERY] recover_from_fault: complete")
     return True
 
 def _is_gripper_holding_block(handles: SystemHandles, fallback_holding: Optional[bool]) -> bool:
@@ -351,7 +364,8 @@ def movj_pose_combo(handles: SystemHandles, pose: cfg_pose_type) -> str:
         handles._last_movj_speed = None
 
     if desired_speed != handles._last_movj_speed:
-        warn("COMBO", f"MoveJ speed set to {desired_speed}% (combo_active={getattr(handles, 'combo_active', False)})")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("COMBO", f"MoveJ speed set to {desired_speed}% (combo_active={getattr(handles, 'combo_active', False)})")
         handles._last_movj_speed = desired_speed
 
     handles.robot.speed_factor(desired_speed)
@@ -419,7 +433,7 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
     movj_pose_combo(handles, cfg.NEUTRAL_2)
 
 
-def move_to_tower_hover(handles: SystemHandles, stack_level: int) -> None:
+def move_to_tower_hover(handles: SystemHandles, stack_level: int, target_xy: Optional[tuple[float, float]] = None) -> None:
     """
     Move to safe hover position above tower using joint motion (MovJ).
     
@@ -428,8 +442,36 @@ def move_to_tower_hover(handles: SystemHandles, stack_level: int) -> None:
     """
     robot = handles.robot
     hover_pose = cfg.tower_hover_pose(stack_level)
+    if target_xy is not None:
+        hover_pose = (
+            target_xy[0],
+            target_xy[1],
+            hover_pose[2],
+            hover_pose[3],
+            hover_pose[4],
+            hover_pose[5],
+        )
     info("STACK", f"tower hover level={stack_level} hover_pose={hover_pose}")
     movj_pose_combo(handles, hover_pose)
+
+
+def move_to_hover_xy(handles: SystemHandles, target_x: float, target_y: float, stack_level: int) -> None:
+    """
+    Move to the requested XY while holding tower hover Z/orientation for this stack level.
+    """
+    robot = handles.robot
+    nominal_hover = cfg.tower_hover_pose(stack_level)
+    hover_xy_pose = (
+        target_x,
+        target_y,
+        nominal_hover[2],
+        nominal_hover[3],
+        nominal_hover[4],
+        nominal_hover[5],
+    )
+    info("STACK", f"tower hover xy align level={stack_level} hover_xy_pose={hover_xy_pose}")
+    robot.speed_factor(cfg.SPEED_PRECISION)
+    robot.movl_pose(hover_xy_pose)
 
 
 def complete_place_neutral_exit(handles: SystemHandles, stack_level: int) -> None:
@@ -474,15 +516,20 @@ def complete_place_sequence(
         place_pose[5],
     )
 
-    # Linear vertical descent
+    # Pure vertical-only drop using relative Z from configured hover/place levels
+    hover_z = cfg.tower_hover_pose(stack_level)[2]
+    place_z = cfg.tower_place_pose(stack_level)[2]
+    drop_mm = max(0.0, hover_z - place_z)
     robot.speed_factor(cfg.SPEED_PRECISION)
-    robot.movl_pose(place_pose)
+    info("CONTROL", f"[DROP] lvl={stack_level} drop_mm={drop_mm:.2f} using=relmovl_user dz=-{drop_mm:.2f}")
+    robot.relmovl_user(0, 0, -drop_mm, 0, 0, 0)
 
     gripper.open()
     time.sleep(0.3)
 
     # Linear vertical retract
     robot.speed_factor(cfg.SPEED_PRECISION)
+    info("CONTROL", f"[RETRACT] lvl={stack_level} retract_pose=({retract_hover_pose[0]:.2f},{retract_hover_pose[1]:.2f},{retract_hover_pose[2]:.2f})")
     robot.movl_pose(retract_hover_pose)
     # Ensure retract finished before joint exit
     robot.wait_until_idle()
