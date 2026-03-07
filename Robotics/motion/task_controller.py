@@ -807,149 +807,21 @@ _startup_banner()
 
 
 # --- 2. CAMERA PIPELINE ---
-def create_pipeline(enable_rawL: bool = False):
-    if (not CAMERA_STREAM_ENABLED) or (dai is None):
-        raise RuntimeError("DepthAI pipeline unavailable: camera streaming disabled or DepthAI import failed")
-    pipeline = dai.Pipeline()
+import camera_streamer
 
-    monoL = pipeline.create(dai.node.MonoCamera)
-    monoL.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-    monoL.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
-    monoL.setFps(20)
-
-    monoR = pipeline.create(dai.node.MonoCamera)
-    monoR.setBoardSocket(dai.CameraBoardSocket.CAM_C)
-    monoR.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
-    monoR.setFps(20)
-
-    encL = pipeline.create(dai.node.VideoEncoder)
-    encL.setDefaultProfilePreset(20, dai.VideoEncoderProperties.Profile.MJPEG)
-    encL.setQuality(40)
-
-    encR = pipeline.create(dai.node.VideoEncoder)
-    encR.setDefaultProfilePreset(20, dai.VideoEncoderProperties.Profile.MJPEG)
-    encR.setQuality(40)
-
-    monoL.out.link(encL.input)
-    monoR.out.link(encR.input)
-
-    sync = pipeline.create(dai.node.Sync)
-    sync.setSyncThreshold(timedelta(milliseconds=50))
-    encL.bitstream.link(sync.inputs["left"])
-    encR.bitstream.link(sync.inputs["right"])
-
-    xout = pipeline.create(dai.node.XLinkOut)
-    xout.setStreamName("out")
-    sync.out.link(xout.input)
-
-    # For Python processing (raw left frames)
-    if enable_rawL:
-        xout_rawL = pipeline.create(dai.node.XLinkOut)
-        xout_rawL.setStreamName("rawL")
-        monoL.out.link(xout_rawL.input)
-
-    return pipeline
-
-
-# --- 3. HIGHWAY 1: VIDEO SERVER ---
-def camera_server(mxid, port, label):
+def camera_server_wrapper(mxid, port, label):
     if (not CAMERA_STREAM_ENABLED) or (dai is None):
         return
     enable_rawL = (label == "INSPECTOR" and VISION_MODE_ENABLED and PERC_AVAILABLE)
-    pipeline = create_pipeline(enable_rawL=enable_rawL)
-    server = None
-    perc_started = False
-    try:
-        with dai.Device(pipeline, dai.DeviceInfo(mxid)) as device:
-            if _is_official_mode():
-                try:
-                    device.setLogLevel(dai.LogLevel.CRITICAL)
-                except Exception:
-                    pass
-            info("CAM", f"[{label}] Camera Connected.")
-            q = device.getOutputQueue("out", maxSize=4, blocking=False)
-            q_raw = None
-            if enable_rawL:
-                try:
-                    q_raw = device.getOutputQueue("rawL", maxSize=4, blocking=False)
-                except Exception as e:
-                    warn("PERC", f"[{label}] rawL stream unavailable, perception disabled for this run: {e}")
-            
-            # Start perception worker (e.g., on INSPECTOR feed)
-            if enable_rawL and q_raw is not None:
-                try:
-                    import numpy as np
-                    info("VISION", "Extracting Factory Lens Calibration from OAK-D...")
-                    
-                    # 1. Request the onboard EEPROM calibration dataset from the device
-                    calibData = device.readCalibration()
-                    
-                    # 2. Extract the 3x3 Intrinsic Matrix for the Left Mono Camera (CAM_B)
-                    camera_matrix = np.array(calibData.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720))
-                    
-                    # 3. Extract the 14x1 Distortion Coefficients array
-                    dist_coeffs = np.array(calibData.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B))
-                    
-                    # 4. Feed the perfect math into the engine
-                    perc_engine.update_intrinsics(camera_matrix, dist_coeffs)
-
-                    # 5. Start the background thread utilizing the raw camera frames
-                    perc_engine.start_worker(q_raw, None)
-                    perc_started = True
-                except Exception as e:
-                    warn("PERC", f"[{label}] Failed to start perception worker or extract intrinsics: {e}")
-
-            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.bind(('0.0.0.0', port))
-            server.listen(1)
-            server.settimeout(1.0)
-            _track_server_socket(server)
-            info("CAM", f"[{label}] Streaming on port {port}")
-
-            while not STOP_EVENT.is_set():
-                try:
-                    conn, addr = server.accept()
-                except socket.timeout:
-                    continue
-                except OSError:
-                    if STOP_EVENT.is_set():
-                        break
-                    raise
-                _track_client_socket(conn)
-                conn.settimeout(1.0)
-                console_emit(f"[{label}] Unity connected from {addr}", tag="UNITY", level="INFO", module="CAM", allow_in_quiet=True)
-                try:
-                    while not STOP_EVENT.is_set():
-                        group = q.get()
-                        dL = group["left"].getData().tobytes()
-                        dR = group["right"].getData().tobytes()
-                        conn.sendall(b'L' + struct.pack('>I', len(dL)) + dL)
-                        conn.sendall(b'R' + struct.pack('>I', len(dR)) + dR)
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    # Typical when Unity stops play mode / reconnects
-                    if not STOP_EVENT.is_set():
-                        if _is_debug_enabled():
-                            warn("CAM", f"[{label}] Client stream ended: {e}")
-                finally:
-                    _close_socket_quietly(conn)
-                    _untrack_client_socket(conn)
-                    if not STOP_EVENT.is_set():
-                        console_emit(f"[{label}] Unity disconnected.", tag="UNITY", level="INFO", module="CAM", allow_in_quiet=True)
-    except Exception as e:
-        if not STOP_EVENT.is_set():
-            warn("CAM", f"[{label}] Error: {e}")
-    finally:
-        if perc_started:
-            try:
-                perc_engine.stop_worker()
-            except Exception as e:
-                warn("PERC", f"[{label}] Failed to stop perception worker: {e}")
-        if server is not None:
-            _close_socket_quietly(server)
-            _untrack_server_socket(server)
+    
+    camera_streamer.start_camera_server(
+        mxid=mxid, 
+        port=port, 
+        label=label, 
+        enable_rawL=enable_rawL, 
+        stop_event=STOP_EVENT, 
+        perc_engine=perc_engine if enable_rawL else None
+    )
 
 def ensure_ready(precision: bool = True):
     """
@@ -2424,9 +2296,9 @@ _start_worker_thread("command-server", command_server)
 _start_worker_thread("admin-server", admin_server)
 _start_worker_thread("leaderboard-http", leaderboard_http_server)
 if CAMERA_STREAM_ENABLED and (dai is not None):
-    _start_worker_thread("camera-inspector", camera_server, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
+    _start_worker_thread("camera-inspector", camera_server_wrapper, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
     time.sleep(10)
-    _start_worker_thread("camera-site-manager", camera_server, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
+    _start_worker_thread("camera-site-manager", camera_server_wrapper, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
 if _is_official_mode():
     console_emit("Start Unity and press Play...", tag="UNITY", level="INFO", module="CONTROL", allow_in_quiet=True)
 _start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)
