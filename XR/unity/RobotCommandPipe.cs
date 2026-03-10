@@ -204,13 +204,13 @@ public class RobotCommandPipe : MonoBehaviour
         if (line.Equals("RUN_COMPLETE", StringComparison.OrdinalIgnoreCase) ||
             line.StartsWith("RUN_COMPLETE ", StringComparison.OrdinalIgnoreCase))
         {
-            uiStateManager?.ResetToBoot();
+            uiStateManager?.OnRunComplete();
             return;
         }
 
         if (line.Equals("RUN_FAIL TUMBLE", StringComparison.OrdinalIgnoreCase))
         {
-            uiStateManager?.ResetToBoot();
+            uiStateManager?.OnRunTumble();
             return;
         }
 
@@ -232,6 +232,32 @@ public class RobotCommandPipe : MonoBehaviour
                 if (logCommands)
                     Debug.Log("[RobotCommandPipe] Decision ready: " + _latestDecisionSeq);
             }
+            return;
+        }
+
+        if (line.StartsWith("BOOST_STATE ", StringComparison.OrdinalIgnoreCase))
+        {
+            string[] parts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 3)
+                return;
+
+            if (!int.TryParse(parts[1], out int comboCount))
+                return;
+
+            if (!int.TryParse(parts[2], out int boostRaw))
+                return;
+
+            if (boostRaw != 0 && boostRaw != 1)
+                return;
+
+            bool boostActive = boostRaw == 1;
+            uiStateManager?.OnBoostState(comboCount, boostActive);
+            return;
+        }
+
+        if (line.Equals("BOOST_END", StringComparison.OrdinalIgnoreCase))
+        {
+            uiStateManager?.OnBoostEnded();
             return;
         }
 
