@@ -202,15 +202,11 @@ Architecture note: UI feedback (audio/haptics/press animation) is now handled by
 
 ================================================================
 
-7. Current Development Status (Dev 12)
+7. Current Development Status (Dev 24)
 
 Completed:
 
-Dev 24 UI update:
-
 • XR UI interaction feedback stack centralized in `XRUIButtonFeedback` (audio, haptics, press animation)
-• UI logic handlers now remain logic-only (no direct feedback playback)
-
 • Stable dual-camera stereo stream
 • Hardware-encoded JPEG pipeline
 • Threaded TCP video bridge
@@ -220,14 +216,6 @@ Dev 24 UI update:
 • World-space ZoneIndicator visualization
 • Stable NUDGE controls (X-axis active)
 • Reconnect logic functional
-
-XR now fully aligned with Robotics Dev 12 control loop.
-
-In Progress:
-
-• Bidirectional (XY) nudge UI
-• Drift visualization (ghost brick concept)
-• Structured run feedback overlays
 
 ================================================================
 

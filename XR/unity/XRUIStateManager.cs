@@ -48,6 +48,16 @@ public class XRUIStateManager : MonoBehaviour
     [Tooltip("Optional countdown label. If unassigned, countdown runs without text.")]
     public Text countdownLabel;
 
+    [Header("Audio")]
+    [Tooltip("Optional music ducking controller. Lowered only after START is acknowledged.")]
+    public MusicDucker musicDucker;
+    [Tooltip("Optional UI audio player for gameplay event SFX.")]
+    public UIAudioPlayer audioPlayer;
+
+    [Header("Boost UI")]
+    [Tooltip("Optional Boost UI controller for BOOST_STATE updates from RobotCommandPipe.")]
+    public BoostUIController boostUIController;
+
     private bool _waitingForStartAck = false;
     private float _startAckDeadline = 0f;
     private Coroutine _startCountdownRoutine = null;
@@ -55,6 +65,7 @@ public class XRUIStateManager : MonoBehaviour
     private float _fixPendingStartTime = 0f;
     private bool _decisionWindowActive = false;
     private bool hasName = false;
+    private bool _boostActive = false;
 
     void Awake()
     {
@@ -104,6 +115,7 @@ public class XRUIStateManager : MonoBehaviour
         }
         SetCountdownText("");
         _decisionWindowActive = false;
+        musicDucker?.LowerMusic();
         ApplyState(UIState.Running);
     }
 
@@ -142,9 +154,53 @@ public class XRUIStateManager : MonoBehaviour
         Debug.Log($"[UI] Decision window opened. fix={fixEnabled} drop={dropEnabled} nudge={nudgeEnabled}");
     }
 
+    public void OnBoostState(int comboCount, bool boostActive)
+    {
+        if (!_boostActive && boostActive)
+        {
+            audioPlayer?.PlayComboBoost();
+            musicDucker?.BoostSwell();
+        }
+        _boostActive = boostActive;
+
+        if (boostUIController == null)
+            return;
+
+        boostUIController.SetBoostState(comboCount, boostActive);
+    }
+
+    public void OnBoostEnded()
+    {
+        _boostActive = false;
+        audioPlayer?.PlayBoostEnd();
+        musicDucker?.LowerMusic();
+
+        if (boostUIController == null)
+            return;
+
+        boostUIController.OnBoostEnded();
+    }
+
+    public void OnRunComplete()
+    {
+        _boostActive = false;
+        audioPlayer?.PlayRunSuccess();
+        musicDucker?.RestoreMusic();
+        ResetToBoot();
+    }
+
+    public void OnRunTumble()
+    {
+        _boostActive = false;
+        audioPlayer?.PlayTumble();
+        musicDucker?.RestoreMusic();
+        ResetToBoot();
+    }
+
     public void ResetToBoot()
     {
         hasName = false;
+        _boostActive = false;
         _waitingForStartAck = false;
         _waitingForFixAck = false;
         _fixPendingStartTime = 0f;
@@ -170,6 +226,8 @@ public class XRUIStateManager : MonoBehaviour
     public void OnDropAck()
     {
         _decisionWindowActive = false;
+        string zone = commandPipe != null ? commandPipe.currentZone : null;
+        audioPlayer?.PlayDropDelayed(zone);
         ExitFixMode();
     }
 
