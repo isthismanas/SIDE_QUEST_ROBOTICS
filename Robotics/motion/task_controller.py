@@ -865,6 +865,16 @@ def send_nack(cmd: str, reason: str) -> bool:
     return _send_line_to_unity(f"NACK {cmd} {reason}")
 
 
+def send_boost_state(combo_count: int, boost_active: bool) -> bool:
+    combo = max(0, min(3, int(combo_count)))
+    boost = 1 if bool(boost_active) else 0
+    return _send_line_to_unity(f"BOOST_STATE {combo} {boost}")
+
+
+def send_boost_end() -> bool:
+    return _send_line_to_unity("BOOST_END")
+
+
 def _reset_drift_scale_for_run(boundary: str) -> None:
     default_scale = float(getattr(cfg, "DRIFT_SCALE_DEFAULT", getattr(cfg, "DRIFT_SCALE", 1.0)))
     cfg.DRIFT_SCALE = default_scale
@@ -1054,8 +1064,11 @@ def handle_command(cmd_str: str, source: str) -> None:
         current_zone = "GREEN"
         current_zone_stack_level = None
         green_place_streak = 0
+        if combo_active:
+            send_boost_end()
         combo_active = False
         handles.combo_active = combo_active
+        send_boost_state(0, False)
         run_id = None
         run_finalized = False
         current_run_seed = None
@@ -1128,8 +1141,11 @@ def handle_command(cmd_str: str, source: str) -> None:
         current_zone = "GREEN"
         current_zone_stack_level = None
         green_place_streak = 0
+        if combo_active:
+            send_boost_end()
         combo_active = False
         handles.combo_active = combo_active
+        send_boost_state(0, False)
         run_id = None
         run_finalized = False
         current_run_seed = None
@@ -1390,8 +1406,11 @@ def handle_command(cmd_str: str, source: str) -> None:
                 run_id = uuid4().hex
                 run_finalized = False
                 green_place_streak = 0
+                if combo_active:
+                    send_boost_end()
                 combo_active = False
                 handles.combo_active = combo_active
+                send_boost_state(0, False)
                 current_run_seed = _generate_runtime_run_seed()
                 cfg.DRIFT_RUNTIME_RUN_SEED = current_run_seed
                 cfg.DRIFT_RUNTIME_PARTICIPANT = participant_name or ""
@@ -1725,9 +1744,11 @@ def handle_command(cmd_str: str, source: str) -> None:
                 if m in (9, 11):
                     green_place_streak = 0
                     if combo_active:
+                        send_boost_end()
                         combo_active = False
                         handles.combo_active = combo_active
                         warn("COMBO", "combo ended")
+                    send_boost_state(0, False)
                     console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
                     fault_result = step(STATE, Event.FAULT)
                     if fault_result.allowed:
@@ -1750,9 +1771,11 @@ def handle_command(cmd_str: str, source: str) -> None:
                     else:
                         green_place_streak = 0
                         if combo_active:
+                            send_boost_end()
                             combo_active = False
                             handles.combo_active = combo_active
                             warn("COMBO", "combo ended")
+                        send_boost_state(0, False)
 
                     combo_target = int(getattr(cfg, "COMBO_GREEN_PLACEMENTS_TARGET", 3))
                     if combo_target > 0 and green_place_streak >= combo_target:
@@ -1760,7 +1783,10 @@ def handle_command(cmd_str: str, source: str) -> None:
                         warn("COMBO", f"{participant} combo achieved: {combo_target}x GREEN placements")
                         combo_active = True
                         handles.combo_active = combo_active
+                        send_boost_state(combo_target, True)
                         green_place_streak = 0
+                    elif zone_at_commit == "GREEN":
+                        send_boost_state(green_place_streak, False)
 
                 handles.combo_active = combo_active
                 actions.complete_place_neutral_exit(handles, current_stack_level)
@@ -1775,9 +1801,11 @@ def handle_command(cmd_str: str, source: str) -> None:
             except Exception as e:
                 green_place_streak = 0
                 if combo_active:
+                    send_boost_end()
                     combo_active = False
                     handles.combo_active = combo_active
                     warn("COMBO", "combo ended")
+                send_boost_state(0, False)
                 warn(module, f"[STACK] Place failed: {e}")
                 proposed_place_pose = None
                 proposed_place_stack_level = None
@@ -1989,8 +2017,11 @@ def command_server():
             target_stack_count = min(7, len(cfg.PICK_SEQUENCE))
             controller_busy = False
             green_place_streak = 0
+            if combo_active:
+                send_boost_end()
             combo_active = False
             handles.combo_active = combo_active
+            send_boost_state(0, False)
             run_id = None
             run_finalized = False
             current_run_seed = None
