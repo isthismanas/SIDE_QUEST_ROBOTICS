@@ -85,6 +85,7 @@ NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
 PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision"
+# COMM_MODE = "legacy" # "legacy" | "voice"
 CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
 PICK_CLEARANCE_MM = 40.0      # height above block before/after pick
 PLACE_CLEARANCE_MM = 40.0     # height above tower during approach
@@ -219,7 +220,7 @@ DRIFT_MAX_XY_MM = 5.0
 # 0.0 = no drift
 # 1.0 = baseline
 # 2.0 = double drift
-DRIFT_SCALE = 0 #1.35
+DRIFT_SCALE = 1.35
 DRIFT_SCALE_DEFAULT = DRIFT_SCALE
 
 # Distribution mode
