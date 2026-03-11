@@ -82,6 +82,25 @@ def _resolve_label(mxid: str, index: int) -> str:
     return DEFAULT_LABELS_BY_MXID.get(mxid, f"OAK_{index}")
 
 
+def _device_mxid(device_info: object, index: int) -> str:
+    """
+    DepthAI has exposed device identifiers differently across releases.
+    Resolve the most specific available MXID without assuming one API shape.
+    """
+    getter = getattr(device_info, "getMxId", None)
+    if callable(getter):
+        mxid = getter()
+        if mxid:
+            return str(mxid)
+
+    for attr_name in ("mxid", "mxId", "name"):
+        value = getattr(device_info, attr_name, None)
+        if value:
+            return str(value)
+
+    return f"UNKNOWN_{index}"
+
+
 def _summarize_pose(pose: tuple[float, float, float, float, float, float]) -> str:
     x, y, z, roll, pitch, yaw = pose
     return (
@@ -254,7 +273,7 @@ def main() -> int:
     print("[PHASE1] Available devices:")
     stats_list: list[ProbeStats] = []
     for index, device in enumerate(available_devices, start=1):
-        mxid = device.getMxId()
+        mxid = _device_mxid(device, index)
         label = _resolve_label(mxid, index)
         print(f"[PHASE1]   {label} mxid={mxid}")
         stats_list.append(ProbeStats(label=label, mxid=mxid))
