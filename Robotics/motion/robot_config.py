@@ -51,6 +51,16 @@ ROBOT_IP = "192.168.5.1"
 DASHBOARD_PORT = 29999
 SOCKET_TIMEOUT_S = 5.0
 
+# Camera identifiers. Preserve legacy MXIDs but allow current PoE device ids.
+INSPECTOR_CAMERA_IDS = (
+    "19443010B14C872F00",
+    "169.254.1.223",
+)
+MANAGER_CAMERA_IDS = (
+    "194430108183F12E00",
+    "169.254.1.222",
+)
+
 # ----------------------------
 # Speed Profiles
 # ----------------------------
