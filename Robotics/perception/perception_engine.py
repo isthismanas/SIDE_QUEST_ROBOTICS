@@ -26,6 +26,11 @@ class PerceptionEngine:
             
         poses = self.tracker.compute_poses(frame_bgr, self.camera_matrix, self.dist_coeffs)
         
+        if poses:
+            for m_id, pose in poses.items():
+                x, y, z, roll, pitch, yaw = pose
+                info("PERCEPTION", f"Detected Marker {m_id} at XYZ: ({x:.3f}, {y:.3f}, {z:.3f})")
+
         with self.state_lock:
             self.latest_state = poses
             
