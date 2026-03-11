@@ -523,7 +523,7 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             padding: 0;
         }
         .logo {
-            height: 200px;
+            height: 100px;
             max-width: 26%;
             object-fit: contain;
         }
@@ -597,6 +597,8 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
                 <img src=\"/assets/logo1.png\" alt=\"Side Quest Logo\" class=\"logo\">
                 <img src=\"/assets/logo2.png\" alt=\"Side Quest Logo 2\" class=\"logo\">
                 <img src=\"/assets/logo3.png\" alt=\"Side Quest Logo 3\" class=\"logo\">
+                <img src=\"/assets/logo4.png\" alt=\"Side Quest Logo 4\" class=\"logo\">
+                <img src=\"/assets/logo5.png\" alt=\"Side Quest Logo 5\" class=\"logo\">
             </div>
         </div>
         <h1>SIDE QUEST LEADERBOARD</h1>
