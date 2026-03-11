@@ -54,7 +54,6 @@ SideQuestRobotics/
 local_project_docs/
 SideQuestRobotics/
 local_project_docs/
-Robotics/motion/camera_streamer.py
 Robotics/perception/next_steps_integration.md
 Robotics/perception/system_integration_overview.md
 AGENTS.md
