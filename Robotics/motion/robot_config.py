@@ -237,7 +237,7 @@ def place_exit_neutral_slot(stack_level: int) -> int:
 
 
 def requires_post_place_y_shuffle(stack_level: int) -> bool:
-    return _is_explicit_build_layout() and int(stack_level) in (5, 6)
+    return _is_explicit_build_layout() and int(stack_level) in (4, 5, 6)
 
 
 def post_place_y_shuffle_mm(stack_level: int) -> float:
@@ -350,7 +350,7 @@ DRIFT_MAX_XY_MM = 5.0
 # 0.0 = no drift
 # 1.0 = baseline
 # 2.0 = double drift
-DRIFT_SCALE = 1.35
+DRIFT_SCALE = 0
 DRIFT_SCALE_DEFAULT = DRIFT_SCALE
 
 # Distribution mode
