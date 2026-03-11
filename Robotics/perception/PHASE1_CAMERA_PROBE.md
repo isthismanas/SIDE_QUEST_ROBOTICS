@@ -8,6 +8,7 @@ calibration.
 
 - Enumerates available OAK-D devices by `MxId`
 - Connects to each device independently
+- Probes devices one at a time to avoid DepthAI multi-device contention on the Pi
 - Reads the `CAM_B` mono feed used by the current perception stack
 - Runs the existing `ArucoTracker` on that feed
 - Prints marker coordinates per device and a final summary
@@ -29,6 +30,9 @@ From the repo root on the Pi:
 source ~/regolith-robotics-env/bin/activate
 python3 Robotics/perception/phase1_camera_probe.py --duration-s 20
 ```
+
+With multiple devices present, the probe divides the duration across them. For
+example, `--duration-s 20` probes two cameras for roughly 10 seconds each.
 
 If you want to watch a single marker id:
 

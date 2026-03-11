@@ -14,7 +14,6 @@ import argparse
 import os
 import signal
 import sys
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -63,15 +62,37 @@ class ProbeStats:
         return self.detection_frames / float(self.frames)
 
 
+def _create_node(pipeline: dai.Pipeline, node_name: str):
+    """
+    DepthAI node construction differs across releases.
+    Support both `pipeline.create(dai.node.X)` and older convenience helpers.
+    """
+    node_namespace = getattr(dai, "node", None)
+    node_cls = getattr(node_namespace, node_name, None) if node_namespace is not None else None
+    if node_cls is not None:
+        return pipeline.create(node_cls)
+
+    factory_name = f"create{node_name}"
+    factory = getattr(pipeline, factory_name, None)
+    if callable(factory):
+        return factory()
+
+    legacy_cls = getattr(dai, node_name, None)
+    if legacy_cls is not None:
+        return pipeline.create(legacy_cls)
+
+    raise RuntimeError(f"DepthAI node '{node_name}' is unavailable in this environment.")
+
+
 def _build_pipeline(fps: float) -> dai.Pipeline:
     pipeline = dai.Pipeline()
 
-    mono_left = pipeline.create(dai.node.MonoCamera)
+    mono_left = _create_node(pipeline, "MonoCamera")
     mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
     mono_left.setFps(fps)
 
-    xout_raw = pipeline.create(dai.node.XLinkOut)
+    xout_raw = _create_node(pipeline, "XLinkOut")
     xout_raw.setStreamName("rawL")
     mono_left.out.link(xout_raw.input)
 
@@ -151,13 +172,13 @@ def _probe_device(
     marker_id: Optional[int],
     detection_print_interval_s: float,
     heartbeat_interval_s: float,
-    stop_event: threading.Event,
+    run_duration_s: float,
     stats: ProbeStats,
 ) -> None:
     tracker = ArucoTracker(marker_size=marker_size_m)
-    pipeline = _build_pipeline(fps=fps)
 
     try:
+        pipeline = _build_pipeline(fps=fps)
         with dai.Device(pipeline, device_info) as device:
             try:
                 device.setLogLevel(dai.LogLevel.CRITICAL)
@@ -181,7 +202,8 @@ def _probe_device(
             )
 
             last_heartbeat_ts = time.time()
-            while not stop_event.is_set():
+            end_ts = None if run_duration_s <= 0 else (time.time() + run_duration_s)
+            while end_ts is None or time.time() < end_ts:
                 frame_packet = queue.get()
                 frame = frame_packet.getCvFrame()
                 if len(frame.shape) == 2:
@@ -278,44 +300,41 @@ def main() -> int:
         print(f"[PHASE1]   {label} mxid={mxid}")
         stats_list.append(ProbeStats(label=label, mxid=mxid))
 
-    stop_event = threading.Event()
+    stop_requested = False
 
     def _request_stop(_signum=None, _frame=None) -> None:
-        stop_event.set()
+        nonlocal stop_requested
+        stop_requested = True
 
     signal.signal(signal.SIGINT, _request_stop)
     signal.signal(signal.SIGTERM, _request_stop)
 
-    threads: list[threading.Thread] = []
-    for device, stats in zip(available_devices, stats_list):
-        thread = threading.Thread(
-            target=_probe_device,
-            kwargs={
-                "device_info": device,
-                "label": stats.label,
-                "fps": args.fps,
-                "marker_size_m": args.marker_size_m,
-                "marker_id": args.marker_id,
-                "detection_print_interval_s": args.detection_print_interval_s,
-                "heartbeat_interval_s": args.heartbeat_interval_s,
-                "stop_event": stop_event,
-                "stats": stats,
-            },
-            name=f"probe-{stats.label}",
-            daemon=True,
-        )
-        threads.append(thread)
-        thread.start()
-
     if args.duration_s > 0:
-        stop_event.wait(timeout=args.duration_s)
-        stop_event.set()
+        per_device_duration_s = max(args.duration_s / max(len(available_devices), 1), 1.0)
     else:
-        while not stop_event.is_set():
-            time.sleep(0.2)
+        per_device_duration_s = 0.0
 
-    for thread in threads:
-        thread.join(timeout=2.0)
+    print(
+        "[PHASE1] Probing devices sequentially "
+        f"(per-device duration: {'infinite' if per_device_duration_s <= 0 else f'{per_device_duration_s:.1f}s'})."
+    )
+
+    for device, stats in zip(available_devices, stats_list):
+        if stop_requested:
+            break
+
+        print(f"[PHASE1] Starting probe for {stats.label} ({stats.mxid})")
+        _probe_device(
+            device_info=device,
+            label=stats.label,
+            fps=args.fps,
+            marker_size_m=args.marker_size_m,
+            marker_id=args.marker_id,
+            detection_print_interval_s=args.detection_print_interval_s,
+            heartbeat_interval_s=args.heartbeat_interval_s,
+            run_duration_s=per_device_duration_s,
+            stats=stats,
+        )
 
     _print_summary(stats_list)
     return 0
