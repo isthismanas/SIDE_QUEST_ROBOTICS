@@ -15,6 +15,7 @@ import os
 import signal
 import sys
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -35,6 +36,7 @@ if THIS_DIR not in sys.path:
 
 from aruco_tracker import ArucoTracker
 
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 DEFAULT_LABELS_BY_MXID = {
     "19443010B14C872F00": "INSPECTOR",
@@ -84,7 +86,20 @@ def _create_node(pipeline: dai.Pipeline, node_name: str):
     raise RuntimeError(f"DepthAI node '{node_name}' is unavailable in this environment.")
 
 
-def _build_pipeline(fps: float) -> dai.Pipeline:
+def _supports_v3_camera_api() -> bool:
+    node_namespace = getattr(dai, "node", None)
+    camera_cls = getattr(node_namespace, "Camera", None) if node_namespace is not None else None
+    return camera_cls is not None and not _supports_v2_xlink()
+
+
+def _supports_v2_xlink() -> bool:
+    node_namespace = getattr(dai, "node", None)
+    if node_namespace is not None and getattr(node_namespace, "XLinkOut", None) is not None:
+        return True
+    return callable(getattr(dai.Pipeline, "createXLinkOut", None))
+
+
+def _build_v2_pipeline(fps: float) -> dai.Pipeline:
     pipeline = dai.Pipeline()
 
     mono_left = _create_node(pipeline, "MonoCamera")
@@ -97,6 +112,168 @@ def _build_pipeline(fps: float) -> dai.Pipeline:
     mono_left.out.link(xout_raw.input)
 
     return pipeline
+
+
+def _v3_device_context(device_info: dai.DeviceInfo):
+    """
+    DepthAI v3 examples initialize a Device first, then pass it into Pipeline.
+    """
+    device = dai.Device(device_info)
+    return dai.Pipeline(device)
+
+
+def _probe_device_v2(
+    device_info: dai.DeviceInfo,
+    fps: float,
+    tracker: ArucoTracker,
+    marker_id: Optional[int],
+    detection_print_interval_s: float,
+    heartbeat_interval_s: float,
+    run_duration_s: float,
+    stats: ProbeStats,
+) -> None:
+    pipeline = _build_v2_pipeline(fps=fps)
+    with dai.Device(pipeline, device_info) as device:
+        try:
+            device.setLogLevel(dai.LogLevel.CRITICAL)
+        except Exception:
+            pass
+
+        queue = device.getOutputQueue("rawL", maxSize=4, blocking=False)
+        calib = device.readCalibration()
+        intrinsics = np.array(
+            calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720),
+            dtype=np.float64,
+        )
+        dist_coeffs = np.array(
+            calib.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B),
+            dtype=np.float64,
+        )
+
+        print(
+            f"[PHASE1] {stats.label} mxid={stats.mxid} connected using DepthAI v2-style pipeline. "
+            "Watching CAM_B mono feed for ArUco markers."
+        )
+
+        last_heartbeat_ts = time.time()
+        end_ts = None if run_duration_s <= 0 else (time.time() + run_duration_s)
+        while end_ts is None or time.time() < end_ts:
+            frame_packet = queue.get()
+            last_heartbeat_ts = _process_frame_packet(
+                frame_packet=frame_packet,
+                tracker=tracker,
+                intrinsics=intrinsics,
+                dist_coeffs=dist_coeffs,
+                marker_id=marker_id,
+                detection_print_interval_s=detection_print_interval_s,
+                heartbeat_interval_s=heartbeat_interval_s,
+                last_heartbeat_ts=last_heartbeat_ts,
+                stats=stats,
+            )
+
+
+def _probe_device_v3(
+    device_info: dai.DeviceInfo,
+    fps: float,
+    tracker: ArucoTracker,
+    marker_id: Optional[int],
+    detection_print_interval_s: float,
+    heartbeat_interval_s: float,
+    run_duration_s: float,
+    stats: ProbeStats,
+) -> None:
+    with _v3_device_context(device_info) as pipeline:
+        camera = _create_node(pipeline, "Camera").build(
+            dai.CameraBoardSocket.CAM_B,
+            sensorFps=fps,
+        )
+        output = camera.requestOutput((1280, 720), type=dai.ImgFrame.Type.GRAY8)
+        queue = output.createOutputQueue()
+
+        device = pipeline.getDefaultDevice()
+        calib = device.readCalibration()
+        intrinsics = np.array(
+            calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720),
+            dtype=np.float64,
+        )
+        dist_coeffs = np.array(
+            calib.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B),
+            dtype=np.float64,
+        )
+
+        pipeline.start()
+        print(
+            f"[PHASE1] {stats.label} mxid={stats.mxid} connected using DepthAI v3-style pipeline. "
+            "Watching CAM_B mono feed for ArUco markers."
+        )
+
+        last_heartbeat_ts = time.time()
+        end_ts = None if run_duration_s <= 0 else (time.time() + run_duration_s)
+        while pipeline.isRunning() and (end_ts is None or time.time() < end_ts):
+            frame_packet = queue.get()
+            last_heartbeat_ts = _process_frame_packet(
+                frame_packet=frame_packet,
+                tracker=tracker,
+                intrinsics=intrinsics,
+                dist_coeffs=dist_coeffs,
+                marker_id=marker_id,
+                detection_print_interval_s=detection_print_interval_s,
+                heartbeat_interval_s=heartbeat_interval_s,
+                last_heartbeat_ts=last_heartbeat_ts,
+                stats=stats,
+            )
+
+        try:
+            pipeline.stop()
+        except Exception:
+            pass
+
+
+def _process_frame_packet(
+    frame_packet,
+    tracker: ArucoTracker,
+    intrinsics: np.ndarray,
+    dist_coeffs: np.ndarray,
+    marker_id: Optional[int],
+    detection_print_interval_s: float,
+    heartbeat_interval_s: float,
+    last_heartbeat_ts: float,
+    stats: ProbeStats,
+) -> float:
+    frame = frame_packet.getCvFrame()
+    if len(frame.shape) == 2:
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    else:
+        frame_bgr = frame
+
+    stats.frames += 1
+    poses = tracker.compute_poses(frame_bgr, intrinsics, dist_coeffs)
+    filtered = _filter_poses(poses, marker_id)
+
+    now = time.time()
+    if filtered:
+        stats.detection_frames += 1
+        stats.last_seen_ts = now
+        stats.markers_seen.update(filtered.keys())
+        stats.last_pose_by_marker.update(filtered)
+
+        if now - stats.last_print_ts >= detection_print_interval_s:
+            for detected_marker, pose in sorted(filtered.items()):
+                print(
+                    f"[PHASE1] {stats.label} marker={detected_marker} "
+                    f"{_summarize_pose(pose)}"
+                )
+            stats.last_print_ts = now
+
+    if now - last_heartbeat_ts >= heartbeat_interval_s:
+        print(
+            f"[PHASE1] {stats.label} heartbeat frames={stats.frames} "
+            f"detection_frames={stats.detection_frames} "
+            f"ratio={stats.detection_ratio():.3f}"
+        )
+        return now
+
+    return last_heartbeat_ts
 
 
 def _resolve_label(mxid: str, index: int) -> str:
@@ -178,65 +355,33 @@ def _probe_device(
     tracker = ArucoTracker(marker_size=marker_size_m)
 
     try:
-        pipeline = _build_pipeline(fps=fps)
-        with dai.Device(pipeline, device_info) as device:
-            try:
-                device.setLogLevel(dai.LogLevel.CRITICAL)
-            except Exception:
-                pass
-
-            queue = device.getOutputQueue("rawL", maxSize=4, blocking=False)
-            calib = device.readCalibration()
-            intrinsics = np.array(
-                calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720),
-                dtype=np.float64,
+        stats.label = label
+        if _supports_v2_xlink():
+            _probe_device_v2(
+                device_info=device_info,
+                fps=fps,
+                tracker=tracker,
+                marker_id=marker_id,
+                detection_print_interval_s=detection_print_interval_s,
+                heartbeat_interval_s=heartbeat_interval_s,
+                run_duration_s=run_duration_s,
+                stats=stats,
             )
-            dist_coeffs = np.array(
-                calib.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B),
-                dtype=np.float64,
+        elif _supports_v3_camera_api():
+            _probe_device_v3(
+                device_info=device_info,
+                fps=fps,
+                tracker=tracker,
+                marker_id=marker_id,
+                detection_print_interval_s=detection_print_interval_s,
+                heartbeat_interval_s=heartbeat_interval_s,
+                run_duration_s=run_duration_s,
+                stats=stats,
             )
-
-            print(
-                f"[PHASE1] {label} mxid={stats.mxid} connected. "
-                "Watching CAM_B mono feed for ArUco markers."
+        else:
+            raise RuntimeError(
+                "Unsupported DepthAI runtime: neither v2 XLink nor v3 Camera API is available."
             )
-
-            last_heartbeat_ts = time.time()
-            end_ts = None if run_duration_s <= 0 else (time.time() + run_duration_s)
-            while end_ts is None or time.time() < end_ts:
-                frame_packet = queue.get()
-                frame = frame_packet.getCvFrame()
-                if len(frame.shape) == 2:
-                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                else:
-                    frame_bgr = frame
-
-                stats.frames += 1
-                poses = tracker.compute_poses(frame_bgr, intrinsics, dist_coeffs)
-                filtered = _filter_poses(poses, marker_id)
-
-                now = time.time()
-                if filtered:
-                    stats.detection_frames += 1
-                    stats.last_seen_ts = now
-                    stats.markers_seen.update(filtered.keys())
-                    stats.last_pose_by_marker.update(filtered)
-
-                    if now - stats.last_print_ts >= detection_print_interval_s:
-                        for detected_marker, pose in sorted(filtered.items()):
-                            print(
-                                f"[PHASE1] {label} marker={detected_marker} "
-                                f"{_summarize_pose(pose)}"
-                            )
-                        stats.last_print_ts = now
-
-                if now - last_heartbeat_ts >= heartbeat_interval_s:
-                    print(
-                        f"[PHASE1] {label} heartbeat frames={stats.frames} "
-                        f"detection_frames={stats.detection_frames} "
-                        f"ratio={stats.detection_ratio():.3f}"
-                    )
-                    last_heartbeat_ts = now
     except Exception as exc:
         stats.error = str(exc)
 
