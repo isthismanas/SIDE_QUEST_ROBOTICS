@@ -69,8 +69,9 @@ MOVEJ_SPEED_COMBO = 90
 # ----------------------------
 # Safe Home / Idle pose (tested; adjust as needed)
 SAFE_HOME_POSE = (273.2320, -23.7896, 378.5702, -180.0, 0.0, -124.0)
+NEUTRAL_1 = (273.2320, -23.7896, 212.9035, -180.0, 0.0, -124.0)
 NEUTRAL_2 = (273.2320, -23.7896, 294.4369, -180.0, 0.0, -124.0)
-NEUTRAL_3 = (273.2320, -23.7896, 378.5702, -180.0, 0.0, -124.0,)
+NEUTRAL_3 = (273.2320, -23.7896, 378.5702, -180.0, 0.0, -124.0)
 
 # ----------------------------
 # Nudge Settings
@@ -84,24 +85,17 @@ NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
-PICK_POSE_MODE = "vision"  # "deterministic" | "vision"
+PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision"
 CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
 PICK_CLEARANCE_MM = 40.0      # height above block before/after pick
 PLACE_CLEARANCE_MM = 40.0     # height above tower during approach
 BLOCK_HEIGHT_MM = 37.0        # physical block height
 
-# Stacking sequence: list of (side, level) tuples defining pick order
-# side: "L" (left) or "R" (right) source stack
-# level: 1-indexed level on source stack
-PICK_SEQUENCE = [
-    ("L", 4),
-    ("R", 3),
-    ("L", 3),
-    ("R", 2),
-    ("L", 2),
-    ("R", 1),
-    ("L", 1),
-]
+# Layout switches (legacy fallback preserved)
+# PICK_LAYOUT_MODE: "legacy_towers" | "pickup_plate"
+# BUILD_LAYOUT_MODE: "tower_stack" | "explicit_points"
+PICK_LAYOUT_MODE = "pickup_plate"
+BUILD_LAYOUT_MODE = "explicit_points"
 
 # Tower capacity
 TOWER_LEVELS = 7
@@ -117,6 +111,46 @@ TOWER_BASE_POSE = (193.4597, -91.4552, 157.8142, 180.0, 0.0, -124.0)
 
 # Safe dump pose (used when tower tumbles)
 SAFE_DUMP_POSE = (197.4741, 49.1437, 156.6749, 180.0, 0.0, -124.0)
+
+# Explicit pickup-plate points
+PICKUP_POINTS = {
+    "P1": (404.2777, -67.4403, 157.2881, -180.0, 0.0, -124.0),
+    "P2": (322.1818, -67.4403, 157.2881, -180.0, 0.0, -124.0),
+    "P3": (362.3367, -13.4532, 157.2881, -180.0, 0.0, -124.0),
+    "P4": (278.4949, -13.4532, 157.2881, -180.0, 0.0, -124.0),
+    "P5": (403.8273, 40.8819, 157.2881, -180.0, 0.0, -124.0),
+    "P6": (323.1831, 38.1755, 157.2881, -180.0, 0.0, -124.0),
+    "P7": (238.8195, 36.9264, 157.2881, -180.0, 0.0, -124.0),
+}
+
+# Explicit build points
+BUILD_POINTS = {
+    "T1": (197.8699, -93.1587, 160.3303, 179.9999, -0.0001, -124.0),
+    "T2": (197.8699, -93.1587, 197.4850, 179.9999, -0.0001, -124.0),
+    "T3": (197.8699, -93.1587, 234.4143, 179.9999, -0.0001, -124.0),
+    "T4": (197.8699, -93.1587, 271.4543, 179.9999, -0.0001, -124.0),
+    "T5": (197.8699, -93.1587, 308.7479, 179.9999, -0.0001, -124.0),
+    "T6": (197.8699, -93.1587, 345.7816, 179.9999, -0.0001, -124.0),
+    "T7": (197.8699, -93.1587, 383.2371, 179.9999, -0.0001, -124.0),
+}
+
+# Explicit tumble dump point
+EXPLICIT_TUMBLE_DUMP_POSE = (195.5782, -15.3110, 157.2881, 179.9999, -0.0001, -124.0)
+
+# Explicit neutral corridor points
+EXPLICIT_NEUTRALS = {
+    1: (289.5256, -18.6253, 226.9103, 179.9999, -0.0001, -124.0),
+    2: (289.5256, -18.6253, 310.4436, 179.9999, -0.0001, -124.0),
+    3: (289.5256, -18.6253, 373.5770, 179.9999, -0.0001, -124.0),
+}
+
+LEGACY_PICK_SEQUENCE = ["L4", "R3", "L3", "R2", "L2", "R1", "L1"]
+PLATE_PICK_SEQUENCE = ["P1", "P2", "P3", "P4", "P5", "P6", "P7"]
+BUILD_SEQUENCE = ["T1", "T2", "T3", "T4", "T5", "T6", "T7"]
+PICK_SEQUENCE = PLATE_PICK_SEQUENCE if str(PICK_LAYOUT_MODE).strip().lower() == "pickup_plate" else LEGACY_PICK_SEQUENCE
+
+# Explicit mode top-stack escape shuffle after retract hover (T6/T7)
+EXPLICIT_POST_PLACE_Y_SHUFFLE_MM = 60.0
 
 # Session logging
 LOG_DIR = "logs"
@@ -161,13 +195,103 @@ def right_pick_pose(level: int):
     return (x, y, z0 + (level - 1) * RIGHT_PICK_STEP_MM, rx, ry, rz)
 
 
+def _is_explicit_pickup_layout() -> bool:
+    return str(PICK_LAYOUT_MODE).strip().lower() == "pickup_plate"
+
+
+def _is_explicit_build_layout() -> bool:
+    return str(BUILD_LAYOUT_MODE).strip().lower() == "explicit_points"
+
+
+def stack_target_count() -> int:
+    return min(int(TOWER_LEVELS), len(PICK_SEQUENCE), len(BUILD_SEQUENCE))
+
+
+def neutral_pose_for_slot(slot: int):
+    if _is_explicit_pickup_layout() or _is_explicit_build_layout():
+        return EXPLICIT_NEUTRALS[int(slot)]
+    if int(slot) <= 1:
+        return NEUTRAL_1
+    if int(slot) == 2:
+        return NEUTRAL_2
+    return NEUTRAL_3
+
+
+def pick_gateway_neutrals(stack_level: int) -> tuple[int, int]:
+    lvl = int(stack_level)
+    if _is_explicit_pickup_layout():
+        pre_slots = [3, 1, 1, 2, 2, 2, 3]
+        post_slots = [1, 1, 2, 2, 2, 3, 3]
+        idx = max(0, min(lvl, len(pre_slots) - 1))
+        return pre_slots[idx], post_slots[idx]
+    return 2, 2
+
+
+def place_exit_neutral_slot(stack_level: int) -> int:
+    lvl = int(stack_level)
+    if _is_explicit_build_layout():
+        slots = [1, 1, 2, 2, 2, 3, 3]
+        idx = max(0, min(lvl, len(slots) - 1))
+        return slots[idx]
+    return 3 if lvl >= 3 else 2
+
+
+def requires_post_place_y_shuffle(stack_level: int) -> bool:
+    return _is_explicit_build_layout() and int(stack_level) in (4, 5, 6)
+
+
+def post_place_y_shuffle_mm(stack_level: int) -> float:
+    return EXPLICIT_POST_PLACE_Y_SHUFFLE_MM if requires_post_place_y_shuffle(stack_level) else 0.0
+
+
+def tumble_dump_pose():
+    if _is_explicit_build_layout():
+        return EXPLICIT_TUMBLE_DUMP_POSE
+    return SAFE_DUMP_POSE
+
+
+def pick_target_pose(target_id: str):
+    tid = str(target_id).strip().upper()
+    if tid.startswith("P"):
+        if tid not in PICKUP_POINTS:
+            raise ValueError(f"Unknown pickup target id: {target_id}")
+        return PICKUP_POINTS[tid]
+    if len(tid) >= 2 and tid[0] in {"L", "R"} and tid[1:].isdigit():
+        level = int(tid[1:])
+        return left_pick_pose(level) if tid[0] == "L" else right_pick_pose(level)
+    raise ValueError(f"Unsupported pickup target id: {target_id}")
+
+
+def pick_target_hover_pose(target_id: str):
+    pose = pick_target_pose(target_id)
+    return (pose[0], pose[1], pose[2] + PICK_CLEARANCE_MM, pose[3], pose[4], pose[5])
+
+
+def build_target_id_for_level(level: int) -> str:
+    idx = max(0, min(int(level), len(BUILD_SEQUENCE) - 1))
+    return BUILD_SEQUENCE[idx]
+
+
+def build_target_pose(target_id: str):
+    tid = str(target_id).strip().upper()
+    if _is_explicit_build_layout():
+        if tid not in BUILD_POINTS:
+            raise ValueError(f"Unknown build target id: {target_id}")
+        return BUILD_POINTS[tid]
+    if tid.startswith("T") and tid[1:].isdigit():
+        level = int(tid[1:]) - 1
+        x, y, z0, rx, ry, rz = TOWER_BASE_POSE
+        return (x, y, z0 + level * BLOCK_HEIGHT_MM, rx, ry, rz)
+    raise ValueError(f"Unsupported build target id: {target_id}")
+
+
 def tower_place_pose(level: int):
     """
     Compute pose to place a block on the tower at a given level (final position).
     level: 0-indexed (0 = bottom of tower, 1 = on top of first block, etc.)
     """
-    x, y, z0, rx, ry, rz = TOWER_BASE_POSE
-    return (x, y, z0 + level * BLOCK_HEIGHT_MM, rx, ry, rz)
+    target_id = build_target_id_for_level(level)
+    return build_target_pose(target_id)
 
 
 def tower_hover_pose(level: int):
@@ -175,8 +299,15 @@ def tower_hover_pose(level: int):
     Compute pose to hover above the tower at a given level (safe approach height).
     level: 0-indexed (0 = above base, 1 = above first block, etc.)
     """
-    x, y, z0, rx, ry, rz = TOWER_BASE_POSE
-    return (x, y, z0 + level * BLOCK_HEIGHT_MM + PLACE_CLEARANCE_MM, rx, ry, rz)
+    place_pose = tower_place_pose(level)
+    return (
+        place_pose[0],
+        place_pose[1],
+        place_pose[2] + PLACE_CLEARANCE_MM,
+        place_pose[3],
+        place_pose[4],
+        place_pose[5],
+    )
 
 
 # ----------------------------
@@ -219,7 +350,7 @@ DRIFT_MAX_XY_MM = 5.0
 # 0.0 = no drift
 # 1.0 = baseline
 # 2.0 = double drift
-DRIFT_SCALE = 1.35
+DRIFT_SCALE = 0
 DRIFT_SCALE_DEFAULT = DRIFT_SCALE
 
 # Distribution mode
