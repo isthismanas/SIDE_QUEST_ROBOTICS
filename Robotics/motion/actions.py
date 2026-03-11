@@ -36,21 +36,20 @@ cfg_pose_type = tuple[float, float, float, float, float, float]
 
 class PickPoseProvider(ABC):
     @abstractmethod
-    def get_pick_pose(self, side: str, level: int) -> tuple[Optional[cfg_pose_type], str]:
+    def get_pick_pose(self, target_id: str) -> tuple[Optional[cfg_pose_type], str]:
         """Return (pose, reason). pose=None means unavailable."""
 
 
 class DeterministicPickPoseProvider(PickPoseProvider):
-    def get_pick_pose(self, side: str, level: int) -> tuple[Optional[cfg_pose_type], str]:
-        if side == "L":
-            return cfg.left_pick_pose(level), "ok"
-        if side == "R":
-            return cfg.right_pick_pose(level), "ok"
-        return None, f"Unknown pick side '{side}'"
+    def get_pick_pose(self, target_id: str) -> tuple[Optional[cfg_pose_type], str]:
+        try:
+            return cfg.pick_target_pose(target_id), "ok"
+        except Exception as e:
+            return None, str(e)
 
 
 class VisionPickPoseProvider(PickPoseProvider):
-    def get_pick_pose(self, side: str, level: int) -> tuple[Optional[cfg_pose_type], str]:
+    def get_pick_pose(self, target_id: str) -> tuple[Optional[cfg_pose_type], str]:
         return None, "Vision pick pose provider not implemented"
 
 
@@ -283,7 +282,7 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
     info("STACK", f"[TUMBLE] holding_detected={holding} fallback_holding={fallback_holding}")
 
     if holding:
-        dump_pose = cfg.SAFE_DUMP_POSE
+        dump_pose = cfg.tumble_dump_pose()
         dump_hover_pose = (
             dump_pose[0],
             dump_pose[1],
@@ -311,11 +310,13 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
         handles.robot.movl_pose(dump_hover_pose)
         handles.robot.wait_until_idle()
 
-        info("STACK", f"[TUMBLE] branch=A step=move_neutral3 pose={cfg.NEUTRAL_3}")
-        handles.robot.movj_pose(cfg.NEUTRAL_3)
+        neutral3 = cfg.neutral_pose_for_slot(3)
+        info("STACK", f"[TUMBLE] branch=A step=move_neutral3 pose={neutral3}")
+        handles.robot.movj_pose(neutral3)
     else:
-        info("STACK", f"[TUMBLE] branch=B step=move_neutral3 pose={cfg.NEUTRAL_3}")
-        handles.robot.movj_pose(cfg.NEUTRAL_3)
+        neutral3 = cfg.neutral_pose_for_slot(3)
+        info("STACK", f"[TUMBLE] branch=B step=move_neutral3 pose={neutral3}")
+        handles.robot.movj_pose(neutral3)
 
     return holding
 
@@ -376,9 +377,9 @@ def movj_pose_combo(handles: SystemHandles, pose: cfg_pose_type) -> str:
 # Stacking: Pick & Place (Hybrid MovJ/MovL)
 # ----------------------------
 
-def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None:
+def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_level: int) -> None:
     """
-    Deterministic left/right pick sequence with hybrid strategy.
+    Deterministic pick sequence with hybrid strategy.
     - MovJ to hover zone (joint motion, faster)
     - MovL vertical descent to block (linear, controlled)
     - Close gripper
@@ -386,14 +387,14 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
     - MovJ to neutral exit pose
 
     Args:
-        side: "L" for left stack, "R" for right stack
-        level: 1-indexed block level on source stack
+        pick_target_id: pickup target id (legacy: L4/R3..., plate: P1..P7)
+        stack_level: 0-indexed build level used for neutral gateway selection
     """
     robot = handles.robot
     gripper = handles.gripper
 
     provider = _active_pick_pose_provider()
-    pick_pose, reason = provider.get_pick_pose(side, level)
+    pick_pose, reason = provider.get_pick_pose(pick_target_id)
     if pick_pose is None:
         raise PickPoseUnavailableError(reason)
 
@@ -406,8 +407,16 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
         pick_pose[5],
     )
 
-    info("STACK", f"pick target side={side} level={level} pick_pose={pick_pose}")
+    pre_slot, post_slot = cfg.pick_gateway_neutrals(stack_level)
+    pre_neutral = cfg.neutral_pose_for_slot(pre_slot)
+    post_neutral = cfg.neutral_pose_for_slot(post_slot)
+
+    info("STACK", f"pick target={pick_target_id} lvl={stack_level} pre_neutral={pre_slot} post_neutral={post_slot} pick_pose={pick_pose}")
     debug("STACK", f"pick hover_pose={hover_pose}")
+
+    # Route through neutral gateway before entering pickup zone
+    movj_pose_combo(handles, pre_neutral)
+    robot.wait_until_idle()
 
     # Joint transition into region
     movj_pose_combo(handles, hover_pose)
@@ -429,8 +438,8 @@ def execute_pick_sequence(handles: SystemHandles, side: str, level: int) -> None
     # Wait for retract to finish before joint exit
     robot.wait_until_idle()
 
-    # Joint exit to neutral
-    movj_pose_combo(handles, cfg.NEUTRAL_2)
+    # Joint exit to neutral gateway for this block
+    movj_pose_combo(handles, post_neutral)
 
 
 def move_to_tower_hover(handles: SystemHandles, stack_level: int, target_xy: Optional[tuple[float, float]] = None) -> None:
@@ -476,10 +485,9 @@ def move_to_hover_xy(handles: SystemHandles, target_x: float, target_y: float, s
 
 def complete_place_neutral_exit(handles: SystemHandles, stack_level: int) -> None:
     """Final neutral MoveJ after placement, combo-aware."""
-    if stack_level >= 3:
-        movj_pose_combo(handles, cfg.NEUTRAL_3)
-    else:
-        movj_pose_combo(handles, cfg.NEUTRAL_2)
+    slot = cfg.place_exit_neutral_slot(stack_level)
+    target_neutral = cfg.neutral_pose_for_slot(slot)
+    movj_pose_combo(handles, target_neutral)
 
 
 def complete_place_sequence(
@@ -534,8 +542,22 @@ def complete_place_sequence(
     # Ensure retract finished before joint exit
     robot.wait_until_idle()
 
-    # Optional sidestep for very high stacks to reduce joint travel over tower
-    if stack_level >= 5:
+    # Explicit mode: after T6/T7 retract hover, perform Y+ shuffle before neutral exit.
+    # Legacy mode keeps existing high-stack sidestep behavior.
+    if cfg.requires_post_place_y_shuffle(stack_level):
+        shuffle_pose = (
+            retract_hover_pose[0],
+            retract_hover_pose[1] + cfg.post_place_y_shuffle_mm(stack_level),
+            retract_hover_pose[2],
+            retract_hover_pose[3],
+            retract_hover_pose[4],
+            retract_hover_pose[5],
+        )
+        robot.speed_factor(cfg.SPEED_PRECISION)
+        info("CONTROL", f"[ESCAPE] lvl={stack_level} explicit_y_shuffle_mm={cfg.post_place_y_shuffle_mm(stack_level):.2f} pose=({shuffle_pose[0]:.2f},{shuffle_pose[1]:.2f},{shuffle_pose[2]:.2f})")
+        robot.movl_pose(shuffle_pose)
+        robot.wait_until_idle()
+    elif stack_level >= 5:
         sidestep_pose = (
             retract_hover_pose[0],
             -10.0,

@@ -809,10 +809,18 @@ _startup_banner()
 
 
 # --- 2. CAMERA PIPELINE ---
-import camera_streamer
+camera_streamer = None
+CAMERA_STREAM_RUNTIME_ENABLED = bool(CAMERA_STREAM_ENABLED)
+if CAMERA_STREAM_RUNTIME_ENABLED:
+    try:
+        import camera_streamer
+    except ModuleNotFoundError:
+        camera_streamer = None
+        CAMERA_STREAM_RUNTIME_ENABLED = False
+        warn("PERC", "camera_streamer missing; camera stream disabled")
 
 def camera_server_wrapper(mxid, port, label):
-    if (not CAMERA_STREAM_ENABLED) or (dai is None):
+    if (not CAMERA_STREAM_RUNTIME_ENABLED) or (dai is None) or (camera_streamer is None):
         return
     enable_rawL = (label == "INSPECTOR" and VISION_MODE_ENABLED and PERC_AVAILABLE)
     
@@ -1393,7 +1401,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 warn(module, "[STACK] No more blocks in PICK_SEQUENCE. Ignoring START.")
                 return
 
-            if current_stack_level >= 7:
+            if current_stack_level >= target_stack_count:
                 if event == Event.START_STACK:
                     send_nack("START", "BAD_STATE")
                 warn(module, "[STACK] Tower full. Ignoring START.")
@@ -1437,10 +1445,10 @@ def handle_command(cmd_str: str, source: str) -> None:
 
             # Execute pick sequence
             my_token = current_session_token
-            side, level = cfg.PICK_SEQUENCE[current_pick_index]
+            pick_target_id = cfg.PICK_SEQUENCE[current_pick_index]
             handles.combo_active = combo_active
             try:
-                actions.execute_pick_sequence(handles, side, level)
+                actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
             except actions.PickPoseUnavailableError as e:
                 if VISION_MODE_ENABLED:
                     _handle_vision_pick_unavailable(e.reason)
@@ -1866,10 +1874,10 @@ def handle_command(cmd_str: str, source: str) -> None:
                     if auto_result.allowed:
                         STATE = auto_result.next_state
                         my_token = current_session_token
-                        side, level = cfg.PICK_SEQUENCE[current_pick_index]
+                        pick_target_id = cfg.PICK_SEQUENCE[current_pick_index]
                         handles.combo_active = combo_active
                         try:
-                            actions.execute_pick_sequence(handles, side, level)
+                            actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
                         except actions.PickPoseUnavailableError as e:
                             if VISION_MODE_ENABLED:
                                 warn(module, f"[VISION] pick pose unavailable: {e.reason}")
@@ -2016,7 +2024,7 @@ def command_server():
             current_stack_level = 0
             # Dev 8 autonomous stacking loop controls
             stacking_enabled = True
-            target_stack_count = min(7, len(cfg.PICK_SEQUENCE))
+            target_stack_count = cfg.stack_target_count()
             controller_busy = False
             green_place_streak = 0
             if combo_active:
@@ -2328,7 +2336,7 @@ def _start_worker_thread(name: str, target, args=(), daemon: bool = False) -> No
 _start_worker_thread("command-server", command_server)
 _start_worker_thread("admin-server", admin_server)
 _start_worker_thread("leaderboard-http", leaderboard_http_server)
-if CAMERA_STREAM_ENABLED and (dai is not None):
+if CAMERA_STREAM_RUNTIME_ENABLED and (dai is not None) and (camera_streamer is not None):
     _start_worker_thread("camera-inspector", camera_server_wrapper, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
     time.sleep(10)
     _start_worker_thread("camera-site-manager", camera_server_wrapper, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
