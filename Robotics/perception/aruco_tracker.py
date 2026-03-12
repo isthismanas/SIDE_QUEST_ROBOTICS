@@ -1,14 +1,37 @@
 import cv2
 import numpy as np
 
+
+DEFAULT_MARKER_SIZE_M = 0.0375
+DEFAULT_MARKER_SIZE_BY_ID_M = {
+    0: 0.0375,
+    11: 0.0200,
+    12: 0.0200,
+    13: 0.0200,
+    14: 0.0200,
+    15: 0.0200,
+    16: 0.0200,
+    17: 0.0200,
+}
+
+
 class ArucoTracker:
-    def __init__(self, dictionary_id=cv2.aruco.DICT_4X4_50, marker_size=0.0375):
+    def __init__(self, dictionary_id=cv2.aruco.DICT_4X4_50, marker_size=DEFAULT_MARKER_SIZE_M):
         """
         :param dictionary_id: The ArUco dictionary to use. Default matches a 4x4 dictionary.
-        :param marker_size: The real-world size of the marker in meters. (37.5mm for the dodecahedrons)
+        :param marker_size: The real-world size of the marker in meters, or a dict
+            mapping marker_id -> size_m for mixed marker sizes.
         """
-        self.marker_size = marker_size
-        
+        if isinstance(marker_size, dict):
+            self.default_marker_size = float(DEFAULT_MARKER_SIZE_M)
+            self.marker_size_by_id = {
+                int(marker_id): float(size_m)
+                for marker_id, size_m in marker_size.items()
+            }
+        else:
+            self.default_marker_size = float(marker_size)
+            self.marker_size_by_id = dict(DEFAULT_MARKER_SIZE_BY_ID_M)
+
         # Determine OpenCV version for API compatibility
         self.is_v4_7_plus = hasattr(cv2.aruco, 'ArucoDetector')
         
@@ -41,15 +64,28 @@ class ArucoTracker:
             
         return corners, ids, rejected
 
-    def estimate_pose(self, corners, camera_matrix, dist_coeffs):
+    def _marker_size_for_id(self, marker_id: int) -> float:
+        return float(self.marker_size_by_id.get(int(marker_id), self.default_marker_size))
+
+    def _object_points_for_size(self, marker_size_m: float):
+        half_size = float(marker_size_m) / 2.0
+        return np.array([
+            [-half_size,  half_size, 0],
+            [ half_size,  half_size, 0],
+            [ half_size, -half_size, 0],
+            [-half_size, -half_size, 0]
+        ], dtype=np.float32)
+
+    def estimate_pose(self, corners, ids, camera_matrix, dist_coeffs):
         """
         Estimate pose of the detected markers.
         :param corners: Marker corners detected by detect_markers.
+        :param ids: Marker ids corresponding to corners.
         :param camera_matrix: 3x3 camera intrinsics matrix.
         :param dist_coeffs: Distortion coefficients.
         :return: rvecs, tvecs
         """
-        if len(corners) == 0:
+        if len(corners) == 0 or ids is None or len(ids) == 0:
             return [], []
 
         if hasattr(cv2, 'solvePnP'):
@@ -57,19 +93,11 @@ class ArucoTracker:
             # Using cv2.solvePnP manually for each marker is more robust across versions.
             rvecs = []
             tvecs = []
-            
-            # Real-world 3D coordinates of the marker corners (Z=0, centered)
-            half_size = self.marker_size / 2.0
-            obj_points = np.array([
-                [-half_size,  half_size, 0],
-                [ half_size,  half_size, 0],
-                [ half_size, -half_size, 0],
-                [-half_size, -half_size, 0]
-            ], dtype=np.float32)
 
-            for corner in corners:
+            for corner, marker_id in zip(corners, ids.flatten()):
                 # corner shape is (1, 4, 2)
                 img_points = corner[0].astype(np.float32)
+                obj_points = self._object_points_for_size(self._marker_size_for_id(int(marker_id)))
                 success, rvec, tvec = cv2.solvePnP(obj_points, img_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
                 if success:
                     rvecs.append(rvec)
@@ -77,8 +105,9 @@ class ArucoTracker:
             
             return np.array(rvecs), np.array(tvecs)
         else:
-            # Very old fallback (though OpenCV 4.x should always have solvePnP)
-            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, self.marker_size, camera_matrix, dist_coeffs)
+            # Very old fallback path. Use the default size only; mixed-size support
+            # depends on the solvePnP path above.
+            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, self.default_marker_size, camera_matrix, dist_coeffs)
             return rvecs, tvecs
             
     def compute_poses(self, image, camera_matrix, dist_coeffs):
@@ -90,7 +119,7 @@ class ArucoTracker:
         if ids is None or len(ids) == 0:
             return {}
 
-        rvecs, tvecs = self.estimate_pose(corners, camera_matrix, dist_coeffs)
+        rvecs, tvecs = self.estimate_pose(corners, ids, camera_matrix, dist_coeffs)
         
         poses = {}
         for i, m_id in enumerate(ids.flatten()):
