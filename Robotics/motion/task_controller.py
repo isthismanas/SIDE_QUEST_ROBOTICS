@@ -12,14 +12,14 @@ import actions
 from actions import SystemHandles
 import drift_engine
 import tolerance_engine
+import vision_controller
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE  # NEW: RS485 Modbus gripper driver
 import robot_config as cfg
 from logger import info, warn, error
 
 # --- Add perception module ---
-PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
-VISION_MODE_ENABLED = PICK_POSE_MODE in {"vision", "perception"}
+VISION_MODE_ENABLED = vision_controller.VISION_MODE_ENABLED
 CAMERA_STREAM_ENABLED = bool(getattr(cfg, "CAMERA_STREAM_ENABLED", True))
 
 dai = None
@@ -28,23 +28,6 @@ if VISION_MODE_ENABLED or CAMERA_STREAM_ENABLED:
         import depthai as dai
     except Exception:
         dai = None
-
-PERC_AVAILABLE = False
-perc_engine = None
-if not VISION_MODE_ENABLED:
-    if bool(getattr(cfg, "DEBUG_ENABLED", False)):
-        info("PERC", "PERC bypassed (deterministic mode)")
-else:
-    try:
-        perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
-        if perc_path not in sys.path:
-            sys.path.append(perc_path)
-        from perception_engine import engine as perc_engine  # type: ignore[reportMissingImports]
-        PERC_AVAILABLE = True
-        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
-            info("PERC", "Perception module enabled")
-    except Exception as e:
-        warn("PERC", f"Perception module disabled: {e}")
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -822,7 +805,7 @@ if CAMERA_STREAM_RUNTIME_ENABLED:
 def camera_server_wrapper(mxid, port, label):
     if (not CAMERA_STREAM_RUNTIME_ENABLED) or (dai is None) or (camera_streamer is None):
         return
-    enable_rawL = (label == "INSPECTOR" and VISION_MODE_ENABLED and PERC_AVAILABLE)
+    enable_rawL, perc_engine = vision_controller.camera_stream_perception_binding(label)
     
     camera_streamer.start_camera_server(
         mxid=mxid, 
@@ -978,6 +961,16 @@ def _handle_post_tower_hover(module: str, my_token) -> bool:
                         proposed_place_pose,
                         center_xy=(base_place[0], base_place[1]),
                     )
+                vision_controller.log_shadow_pose(
+                    context=f"ZONE_INIT lvl={current_stack_level}",
+                    pose=measured_pose if tcp_after is not None else proposed_place_pose,
+                    authoritative_zone=current_zone,
+                    debug_enabled=_is_debug_enabled(),
+                )
+                vision_controller.log_drop_tracking(
+                    stack_level=current_stack_level,
+                    debug_enabled=_is_debug_enabled(),
+                )
 
                 tcp_before_x = tcp_before[0] if tcp_before is not None else float("nan")
                 tcp_before_y = tcp_before[1] if tcp_before is not None else float("nan")
@@ -1447,6 +1440,11 @@ def handle_command(cmd_str: str, source: str) -> None:
             my_token = current_session_token
             pick_target_id = cfg.PICK_SEQUENCE[current_pick_index]
             handles.combo_active = combo_active
+            vision_controller.log_pick_tracking(
+                target_id=pick_target_id,
+                stack_level=current_stack_level,
+                debug_enabled=_is_debug_enabled(),
+            )
             try:
                 actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
             except actions.PickPoseUnavailableError as e:
@@ -1596,6 +1594,12 @@ def handle_command(cmd_str: str, source: str) -> None:
                         proposed_place_pose,
                         center_xy=(nominal_place_pose[0], nominal_place_pose[1]),
                     )
+                vision_controller.log_shadow_pose(
+                    context=f"NUDGE_XY lvl={current_stack_level}",
+                    pose=measured_pose if tcp_pose is not None else proposed_place_pose,
+                    authoritative_zone=current_zone,
+                    debug_enabled=_is_debug_enabled(),
+                )
                 ex = proposed_place_pose[0] - nominal_place_pose[0]
                 ey = proposed_place_pose[1] - nominal_place_pose[1]
                 if _is_debug_enabled():
@@ -1676,6 +1680,12 @@ def handle_command(cmd_str: str, source: str) -> None:
                         proposed_place_pose,
                         center_xy=(nominal_place_pose[0], nominal_place_pose[1]),
                     )
+                vision_controller.log_shadow_pose(
+                    context=f"NUDGE_YAW lvl={current_stack_level}",
+                    pose=measured_pose if tcp_pose is not None else proposed_place_pose,
+                    authoritative_zone=current_zone,
+                    debug_enabled=_is_debug_enabled(),
+                )
                 ex = proposed_place_pose[0] - nominal_place_pose[0]
                 ey = proposed_place_pose[1] - nominal_place_pose[1]
                 if _is_debug_enabled():
@@ -1876,6 +1886,11 @@ def handle_command(cmd_str: str, source: str) -> None:
                         my_token = current_session_token
                         pick_target_id = cfg.PICK_SEQUENCE[current_pick_index]
                         handles.combo_active = combo_active
+                        vision_controller.log_pick_tracking(
+                            target_id=pick_target_id,
+                            stack_level=current_stack_level,
+                            debug_enabled=_is_debug_enabled(),
+                        )
                         try:
                             actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
                         except actions.PickPoseUnavailableError as e:

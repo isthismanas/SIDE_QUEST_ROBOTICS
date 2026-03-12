@@ -8,6 +8,8 @@ Keep ALL magic numbers here:
 - Poses: mm and degrees (Dobot dashboard convention)
 """
 
+import os
+
 # ----------------------------
 # Logging Configuration
 # ----------------------------
@@ -97,6 +99,22 @@ NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 # ----------------------------
 PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision"
 CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
+VISION_ASSIST_ENABLED = True       # calibrated perception in shadow mode; does not control pick motion
+VISION_REFERENCE_MARKER_ID = 0     # marker used for camera-to-robot reference tracking
+VISION_SHADOW_LOGS_ENABLED = True  # logs vision-derived comparisons without changing authority
+VISION_CALIBRATION_JSON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "perception",
+    "calibration_data",
+    "phase2_capture_20260311T091254Z_phase3_solution_20260312T065618Z.json",
+)
+VISION_PICK_MARKER_MAP = {
+    # Example: "P1": 11,
+}
+VISION_DROP_MARKER_MAP = {
+    # Example: "T1": 21,
+}
 PICK_CLEARANCE_MM = 40.0      # height above block before/after pick
 PLACE_CLEARANCE_MM = 40.0     # height above tower during approach
 BLOCK_HEIGHT_MM = 37.0        # physical block height

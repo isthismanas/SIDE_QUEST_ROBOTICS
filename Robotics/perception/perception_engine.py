@@ -11,6 +11,7 @@ class PerceptionEngine:
         self.dist_coeffs = dist_coeffs
         self.latest_state = {}
         self.state_lock = threading.Lock()
+        self.last_log_by_marker = {}
         
         self.running = False
         self.worker_thread = None
@@ -27,9 +28,13 @@ class PerceptionEngine:
         poses = self.tracker.compute_poses(frame_bgr, self.camera_matrix, self.dist_coeffs)
         
         if poses:
+            now = time.monotonic()
             for m_id, pose in poses.items():
                 x, y, z, roll, pitch, yaw = pose
-                info("PERCEPTION", f"Detected Marker {m_id} at XYZ: ({x:.3f}, {y:.3f}, {z:.3f})")
+                last_log_t = self.last_log_by_marker.get(int(m_id), 0.0)
+                if (now - last_log_t) >= 1.0:
+                    info("PERCEPTION", f"Detected Marker {m_id} at XYZ: ({x:.3f}, {y:.3f}, {z:.3f})")
+                    self.last_log_by_marker[int(m_id)] = now
 
         with self.state_lock:
             self.latest_state = poses

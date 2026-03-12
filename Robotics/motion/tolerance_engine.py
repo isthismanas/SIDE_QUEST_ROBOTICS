@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import os, sys
 from math import sqrt
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import robot_config as cfg
+import vision_bridge
 
 PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
 VISION_MODE_ENABLED = PICK_POSE_MODE in {"vision", "perception"}
+VISION_ASSIST_ENABLED = bool(getattr(cfg, "VISION_ASSIST_ENABLED", False))
+PERCEPTION_ASSIST_ENABLED = VISION_MODE_ENABLED or VISION_ASSIST_ENABLED
 
 perc_engine = None
-if VISION_MODE_ENABLED:
+if PERCEPTION_ASSIST_ENABLED:
 	try:
 		perc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception")
 		if perc_path not in sys.path:
@@ -24,30 +27,54 @@ Pose = Tuple[float, float, float, float, float, float]
 
 def convert_camera_to_robot(cam_x_m: float, cam_y_m: float) -> Tuple[float, float]:
 	"""
-	Translates Optical Camera Space into Dobot Coordinate Space.
-	(Note: This assumes the camera is looking straight down).
+	Translate camera-frame XY into robot-frame XY using the current Phase 3 planar calibration.
 	"""
-	cam_x_mm = cam_x_m * 1000.0
-	cam_y_mm = cam_y_m * 1000.0
+	robot_xy, reason = vision_bridge.camera_xy_to_robot_xy_mm(cam_x_m, cam_y_m)
+	if robot_xy is None:
+		raise ValueError(f"camera_to_robot_unavailable:{reason}")
+	return robot_xy
 
-	# 2. Enter the offsets you physically measured in Step 3.1
-	OFFSET_X = 150.0 
-	OFFSET_Y = 50.0  
 
-	return (cam_x_mm + OFFSET_X, cam_y_mm + OFFSET_Y)
+def reference_marker_center_xy(marker_id: Optional[int] = None) -> Tuple[Optional[Tuple[float, float]], str]:
+	if (not PERCEPTION_ASSIST_ENABLED) or (perc_engine is None):
+		return None, "perception_disabled"
+
+	tracking_state = perc_engine.get_latest_state()
+	reference_marker_id = int(getattr(cfg, "VISION_REFERENCE_MARKER_ID", 0) if marker_id is None else marker_id)
+	marker_pose = tracking_state.get(reference_marker_id)
+	if marker_pose is None:
+		return None, "reference_marker_missing"
+
+	try:
+		return convert_camera_to_robot(marker_pose[0], marker_pose[1]), "ok"
+	except Exception as exc:
+		return None, str(exc)
+
+
+def vision_shadow_assessment(pose: Pose, marker_id: Optional[int] = None) -> dict[str, Any]:
+	center_xy, reason = reference_marker_center_xy(marker_id=marker_id)
+	if center_xy is None:
+		return {
+			"available": False,
+			"reason": reason,
+		}
+
+	ax_mm, ay_mm = axis_error_mm(pose, center_xy=center_xy)
+	return {
+		"available": True,
+		"reason": "ok",
+		"center_xy": center_xy,
+		"axis_error_mm": (ax_mm, ay_mm),
+		"zone": classify_pose(pose, center_xy=center_xy),
+	}
 
 
 def radial_error_mm(pose: Pose) -> float:
-	if (not VISION_MODE_ENABLED) or (perc_engine is None):
+	center_xy, _ = reference_marker_center_xy()
+	if center_xy is None:
 		x0, y0 = cfg.TOWER_BASE_POSE[0], cfg.TOWER_BASE_POSE[1]
 	else:
-		tracking_state = perc_engine.get_latest_state()
-		base_marker_data = tracking_state.get(0)
-		if base_marker_data is None:
-			x0, y0 = cfg.TOWER_BASE_POSE[0], cfg.TOWER_BASE_POSE[1]
-		else:
-			cam_x_m, cam_y_m = base_marker_data[0], base_marker_data[1]
-			x0, y0 = convert_camera_to_robot(cam_x_m, cam_y_m)
+		x0, y0 = center_xy
 
 	target_x, target_y = pose[0], pose[1]
 	return sqrt((target_x - x0) ** 2 + (target_y - y0) ** 2)
@@ -74,4 +101,3 @@ def classify_pose(pose: Pose, center_xy: Optional[Tuple[float, float]] = None) -
 	if ax_mm <= yellow_thr and ay_mm <= yellow_thr:
 		return "YELLOW"
 	return "RED"
-
