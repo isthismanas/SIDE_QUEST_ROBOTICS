@@ -110,7 +110,13 @@ VISION_CALIBRATION_JSON = os.path.join(
     "phase2_capture_20260311T091254Z_phase3_solution_20260312T065618Z.json",
 )
 VISION_PICK_MARKER_MAP = {
-    # Example: "P1": 11,
+    "P1": 11,
+    "P2": 12,
+    "P3": 13,
+    "P4": 14,
+    "P5": 15,
+    "P6": 16,
+    "P7": 17,
 }
 VISION_DROP_MARKER_MAP = {
     # Example: "T1": 21,

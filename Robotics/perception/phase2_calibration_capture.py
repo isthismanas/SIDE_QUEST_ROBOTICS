@@ -49,6 +49,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 DEFAULT_TOPDOWN_DEVICE_ID = "169.254.1.223"
 DEFAULT_TOPDOWN_LABEL = "OAK_2"
+DEFAULT_TRACKED_MARKER_IDS = (0, 11, 12, 13, 14, 15, 16, 17)
 
 
 @dataclass
@@ -57,69 +58,86 @@ class LivePose:
     pose: tuple[float, float, float, float, float, float]
 
 
+@dataclass
+class MarkerWindow:
+    buffer: deque[LivePose]
+    detection_frames: int = 0
+    last_pose: Optional[LivePose] = None
+    last_detection_ts: Optional[float] = None
+
+
 class CaptureSession:
-    def __init__(self, buffer_size: int) -> None:
-        self.buffer = deque(maxlen=buffer_size)
+    def __init__(self, buffer_size: int, marker_ids: list[int]) -> None:
+        self.marker_ids = list(dict.fromkeys(int(marker_id) for marker_id in marker_ids))
+        self.marker_windows = {
+            marker_id: MarkerWindow(buffer=deque(maxlen=buffer_size))
+            for marker_id in self.marker_ids
+        }
         self.lock = threading.Lock()
         self.frames = 0
-        self.detection_frames = 0
-        self.last_pose: Optional[LivePose] = None
-        self.last_detection_ts: Optional[float] = None
 
     def record_frame(
         self,
-        pose: Optional[tuple[float, float, float, float, float, float]],
+        poses: dict[int, tuple[float, float, float, float, float, float]],
         timestamp_s: float,
     ) -> None:
         with self.lock:
             self.frames += 1
-            if pose is None:
-                return
-            self.detection_frames += 1
-            live_pose = LivePose(timestamp_s=timestamp_s, pose=pose)
-            self.last_pose = live_pose
-            self.last_detection_ts = timestamp_s
-            self.buffer.append(live_pose)
+            for marker_id in self.marker_ids:
+                pose = poses.get(marker_id)
+                if pose is None:
+                    continue
+                marker_window = self.marker_windows[marker_id]
+                marker_window.detection_frames += 1
+                live_pose = LivePose(timestamp_s=timestamp_s, pose=pose)
+                marker_window.last_pose = live_pose
+                marker_window.last_detection_ts = timestamp_s
+                marker_window.buffer.append(live_pose)
 
     def status(self) -> dict[str, object]:
         with self.lock:
-            pose_count = len(self.buffer)
-            detection_ratio = (
-                0.0 if self.frames == 0 else self.detection_frames / float(self.frames)
-            )
             payload: dict[str, object] = {
                 "frames": self.frames,
-                "detection_frames": self.detection_frames,
-                "detection_ratio": detection_ratio,
-                "buffer_count": pose_count,
-                "last_detection_age_s": (
-                    None
-                    if self.last_detection_ts is None
-                    else max(0.0, time.time() - self.last_detection_ts)
-                ),
+                "markers": {},
             }
-
-            if self.last_pose is not None:
-                payload["last_pose"] = self.last_pose.pose
-
-            if pose_count > 0:
-                payload["window_summary"] = _summarize_pose_window(
-                    [sample.pose for sample in self.buffer]
+            for marker_id in self.marker_ids:
+                marker_window = self.marker_windows[marker_id]
+                pose_count = len(marker_window.buffer)
+                detection_ratio = (
+                    0.0 if self.frames == 0 else marker_window.detection_frames / float(self.frames)
                 )
+                marker_payload: dict[str, object] = {
+                    "detection_frames": marker_window.detection_frames,
+                    "detection_ratio": detection_ratio,
+                    "buffer_count": pose_count,
+                    "last_detection_age_s": (
+                        None
+                        if marker_window.last_detection_ts is None
+                        else max(0.0, time.time() - marker_window.last_detection_ts)
+                    ),
+                }
+                if marker_window.last_pose is not None:
+                    marker_payload["last_pose"] = marker_window.last_pose.pose
+                if pose_count > 0:
+                    marker_payload["window_summary"] = _summarize_pose_window(
+                        [sample.pose for sample in marker_window.buffer]
+                    )
+                payload["markers"][marker_id] = marker_payload
 
             return payload
 
-    def capture_summary(self, min_samples: int) -> Optional[dict[str, object]]:
+    def capture_summary(self, marker_id: int, min_samples: int) -> Optional[dict[str, object]]:
         with self.lock:
-            if len(self.buffer) < min_samples:
+            marker_window = self.marker_windows.get(marker_id)
+            if marker_window is None or len(marker_window.buffer) < min_samples:
                 return None
-            poses = [sample.pose for sample in self.buffer]
-            time_span_s = self.buffer[-1].timestamp_s - self.buffer[0].timestamp_s
+            poses = [sample.pose for sample in marker_window.buffer]
+            time_span_s = marker_window.buffer[-1].timestamp_s - marker_window.buffer[0].timestamp_s
             summary = _summarize_pose_window(poses)
             summary["sample_count"] = len(poses)
             summary["time_span_s"] = max(0.0, time_span_s)
-            summary["first_timestamp_s"] = self.buffer[0].timestamp_s
-            summary["last_timestamp_s"] = self.buffer[-1].timestamp_s
+            summary["first_timestamp_s"] = marker_window.buffer[0].timestamp_s
+            summary["last_timestamp_s"] = marker_window.buffer[-1].timestamp_s
             return summary
 
 
@@ -305,11 +323,22 @@ def _parse_robot_pose(raw: str) -> dict[str, Optional[float]]:
     return payload
 
 
+def _parse_marker_ids(raw: str) -> list[int]:
+    values: list[int] = []
+    for part in raw.split(","):
+        stripped = part.strip()
+        if not stripped:
+            continue
+        values.append(int(stripped))
+    if not values:
+        raise ValueError("Expected at least one marker id.")
+    return list(dict.fromkeys(values))
+
+
 def _capture_worker_v2(
     device_info: dai.DeviceInfo,
     fps: float,
     tracker: ArucoTracker,
-    marker_id: int,
     session: CaptureSession,
     stop_event: threading.Event,
 ) -> None:
@@ -333,7 +362,6 @@ def _capture_worker_v2(
                 tracker=tracker,
                 intrinsics=intrinsics,
                 dist_coeffs=dist_coeffs,
-                marker_id=marker_id,
                 session=session,
             )
 
@@ -342,7 +370,6 @@ def _capture_worker_v3(
     device_info: dai.DeviceInfo,
     fps: float,
     tracker: ArucoTracker,
-    marker_id: int,
     session: CaptureSession,
     stop_event: threading.Event,
 ) -> None:
@@ -374,7 +401,6 @@ def _capture_worker_v3(
                     tracker=tracker,
                     intrinsics=intrinsics,
                     dist_coeffs=dist_coeffs,
-                    marker_id=marker_id,
                     session=session,
                 )
         finally:
@@ -389,7 +415,6 @@ def _process_packet(
     tracker: ArucoTracker,
     intrinsics: np.ndarray,
     dist_coeffs: np.ndarray,
-    marker_id: int,
     session: CaptureSession,
 ) -> None:
     frame = frame_packet.getCvFrame()
@@ -399,14 +424,12 @@ def _process_packet(
         frame_bgr = frame
 
     poses = tracker.compute_poses(frame_bgr, intrinsics, dist_coeffs)
-    pose = poses.get(marker_id)
-    session.record_frame(pose=pose, timestamp_s=time.time())
+    session.record_frame(poses=poses, timestamp_s=time.time())
 
 
 def _start_capture_thread(
     device_info: dai.DeviceInfo,
     fps: float,
-    marker_id: int,
     session: CaptureSession,
     stop_event: threading.Event,
 ) -> threading.Thread:
@@ -427,7 +450,6 @@ def _start_capture_thread(
             "device_info": device_info,
             "fps": fps,
             "tracker": tracker,
-            "marker_id": marker_id,
             "session": session,
             "stop_event": stop_event,
         },
@@ -443,7 +465,7 @@ def _interactive_loop(
     output_path: str,
     device_id: str,
     device_label: str,
-    marker_id: int,
+    marker_ids: list[int],
     min_samples: int,
 ) -> int:
     sample_index = 0
@@ -462,32 +484,54 @@ def _interactive_loop(
 
             if command in {"status", "s"}:
                 status = session.status()
-                print(
-                    "[PHASE2] status "
-                    f"frames={status['frames']} "
-                    f"detection_frames={status['detection_frames']} "
-                    f"ratio={status['detection_ratio']:.3f} "
-                    f"buffer={status['buffer_count']} "
-                    f"last_detection_age_s={status['last_detection_age_s']}"
-                )
-                if "window_summary" in status:
+                print(f"[PHASE2] status frames={status['frames']}")
+                marker_payloads = status["markers"]
+                for tracked_marker_id in marker_ids:
+                    marker_status = marker_payloads[tracked_marker_id]
                     print(
                         "[PHASE2] "
-                        + _format_pose_block(status["window_summary"])
+                        f"marker={tracked_marker_id} "
+                        f"detection_frames={marker_status['detection_frames']} "
+                        f"ratio={marker_status['detection_ratio']:.3f} "
+                        f"buffer={marker_status['buffer_count']} "
+                        f"last_detection_age_s={marker_status['last_detection_age_s']}"
                     )
+                    if "window_summary" in marker_status:
+                        print(
+                            "[PHASE2] "
+                            + _format_pose_block(marker_status["window_summary"])
+                        )
                 continue
 
             if command in {"capture", "c", ""}:
-                summary = session.capture_summary(min_samples=min_samples)
+                selected_marker_id = marker_ids[0]
+                if len(marker_ids) > 1:
+                    marker_raw = input(
+                        f"marker id to capture {marker_ids}: "
+                    ).strip()
+                    if marker_raw:
+                        try:
+                            selected_marker_id = int(marker_raw)
+                        except ValueError:
+                            print(f"[PHASE2] Invalid marker id: {marker_raw}")
+                            continue
+                        if selected_marker_id not in marker_ids:
+                            print(f"[PHASE2] Marker {selected_marker_id} is not in tracked set {marker_ids}")
+                            continue
+
+                summary = session.capture_summary(marker_id=selected_marker_id, min_samples=min_samples)
                 if summary is None:
                     status = session.status()
+                    marker_status = status["markers"].get(selected_marker_id, {})
                     print(
                         "[PHASE2] Not enough buffered detections to capture yet. "
-                        f"buffer={status['buffer_count']} min_required={min_samples}"
+                        f"marker={selected_marker_id} "
+                        f"buffer={marker_status.get('buffer_count', 0)} "
+                        f"min_required={min_samples}"
                     )
                     continue
 
-                print("[PHASE2] Camera window ready.")
+                print(f"[PHASE2] Camera window ready for marker {selected_marker_id}.")
                 print("[PHASE2] " + _format_pose_block(summary))
 
                 label = input("sample label: ").strip() or f"sample_{sample_index + 1:02d}"
@@ -510,7 +554,7 @@ def _interactive_loop(
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "device_id": device_id,
                     "device_label": device_label,
-                    "marker_id": marker_id,
+                    "marker_id": selected_marker_id,
                     "camera_window": summary,
                     "robot_pose": robot_pose,
                     "notes": notes,
@@ -550,6 +594,14 @@ def parse_args() -> argparse.Namespace:
         help="Marker id to capture. Defaults to the confirmed calibration marker 0.",
     )
     parser.add_argument(
+        "--marker-ids",
+        default=None,
+        help=(
+            "Optional comma-separated marker ids to track together, for example "
+            "'0,11,12,13,14,15,16,17'. If omitted, the tool tracks only --marker-id."
+        ),
+    )
+    parser.add_argument(
         "--fps",
         type=float,
         default=20.0,
@@ -580,19 +632,23 @@ def main() -> int:
 
     output_path = _output_path(args.output)
     device_info, resolved_device_id = _resolve_device(args.device_id)
+    marker_ids = (
+        _parse_marker_ids(args.marker_ids)
+        if args.marker_ids is not None
+        else [int(args.marker_id)]
+    )
 
     print(
         f"[PHASE2] Using device {resolved_device_id} "
-        f"label={args.device_label} marker_id={args.marker_id}"
+        f"label={args.device_label} marker_ids={marker_ids}"
     )
     print(f"[PHASE2] Writing captures to {output_path}")
 
-    session = CaptureSession(buffer_size=args.buffer_size)
+    session = CaptureSession(buffer_size=args.buffer_size, marker_ids=marker_ids)
     stop_event = threading.Event()
     thread = _start_capture_thread(
         device_info=device_info,
         fps=args.fps,
-        marker_id=args.marker_id,
         session=session,
         stop_event=stop_event,
     )
@@ -616,7 +672,7 @@ def main() -> int:
             output_path=output_path,
             device_id=resolved_device_id,
             device_label=args.device_label,
-            marker_id=args.marker_id,
+            marker_ids=marker_ids,
             min_samples=args.min_samples,
         )
     finally:
