@@ -70,6 +70,18 @@ handles.combo_active = False
 
 gripper_connected = False
 
+
+def _initialize_gripper_on_startup() -> None:
+    global gripper_connected
+
+    if not gripper.connect():
+        raise RuntimeError("Failed to connect to DH gripper")
+
+    print("[GRIPPER] Ensuring initialization...")
+    gripper.ensure_initialized()
+    print("[GRIPPER] Gripper ready")
+    gripper_connected = True
+
 # --- Simple control mode/state (via State Machine) ---
 STATE = State.IDLE
 
@@ -772,6 +784,7 @@ def leaderboard_http_server() -> None:
 
 _load_leaderboard_mode()
 _apply_console_verbosity()
+_initialize_gripper_on_startup()
 
 
 # --- SIGNIFIER: prove which file is running ---
