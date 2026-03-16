@@ -472,6 +472,14 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
     <title>SIDE QUEST LEADERBOARD</title>
     <style>
+        @font-face {
+            font-family: "Futura Custom";
+            src: local("Futura"), local("Futura PT"), url("/assets/Futura.ttf") format("truetype");
+            font-style: normal;
+            font-weight: 400;
+            font-display: swap;
+        }
+
         :root {
             --bg: #07090f;
             --panel: #0f1420;
@@ -487,15 +495,15 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
         html, body { width: 100%; height: 100%; margin: 0; }
         body {
             font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
-            background: #00E5FF;
+            background: #425ba6;
             color: var(--text);
             display: flex;
             align-items: stretch;
             justify-content: center;
         }
         .wrap {
-            width: min(1200px, 100%);
-            padding: 0 16px 14px 16px;
+            width: 100%;
+            padding: 0 0 14px 0;
             display: grid;
             grid-template-rows: auto auto auto auto;
             gap: 4px;
@@ -525,11 +533,23 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
         h1 {
             margin: 6px 0 2px 0;
             letter-spacing: 1px;
-            font-size: clamp(36px, 6vw, 63px);
+            font-size: clamp(48px, 6.5vw, 96px);
             text-transform: uppercase;
             text-align: center;
-            font-family: Futura, "Futura PT", "Trebuchet MS", Inter, sans-serif;
-            color: #0f1420;
+            white-space: nowrap;
+            font-family: "Futura Custom", Futura, "Futura PT", "Trebuchet MS", Inter, sans-serif;
+            color: #ffffff;
+        }
+        .subhead {
+            margin: 0 0 10px 0;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            font-size: clamp(24px, 3.25vw, 48px);
+            white-space: nowrap;
+            font-family: "Futura Custom", Futura, "Futura PT", "Trebuchet MS", Inter, sans-serif;
+            color: #ffffff;
+            line-height: 1;
         }
         .meta {
             display: flex;
@@ -543,6 +563,8 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             opacity: 0.8;
         }
         .panel {
+            width: min(1200px, 100%);
+            justify-self: center;
             border: 1px solid var(--line);
             border-radius: 14px;
             background: color-mix(in oklab, var(--panel) 92%, black);
@@ -597,6 +619,7 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             </div>
         </div>
         <h1>SIDE QUEST LEADERBOARD</h1>
+        <div class=\"subhead\">HIGH SCORE</div>
         <div class=\"panel\">
             <table>
                 <thead>
@@ -701,6 +724,14 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
                 content_type = "image/jpeg"
             elif ext == ".svg":
                 content_type = "image/svg+xml"
+            elif ext == ".ttf":
+                content_type = "font/ttf"
+            elif ext == ".otf":
+                content_type = "font/otf"
+            elif ext == ".woff":
+                content_type = "font/woff"
+            elif ext == ".woff2":
+                content_type = "font/woff2"
             else:
                 content_type = "application/octet-stream"
 

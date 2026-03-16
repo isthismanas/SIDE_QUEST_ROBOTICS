@@ -70,7 +70,7 @@ class DHGripperPGE:
         r = self.client.read_holding_registers(
             address=addr,
             count=1,
-            slave=self.device_id,
+            device_id=self.device_id,
         )
         if r.isError():
             raise RuntimeError(f"Read error @0x{addr:04X}: {r}")
@@ -82,7 +82,7 @@ class DHGripperPGE:
         r = self.client.write_register(
             address=addr,
             value=int(value),
-            slave=self.device_id,
+            device_id=self.device_id,
         )
         if r.isError():
             raise RuntimeError(f"Write error @0x{addr:04X}: {r}")
