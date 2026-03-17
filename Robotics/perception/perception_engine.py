@@ -1,3 +1,5 @@
+import os
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -5,6 +7,14 @@ from datetime import datetime, timezone
 import cv2
 from aruco_tracker import ArucoTracker
 from logger import info, warn, write_jsonl_event
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+MOTION_DIR = os.path.normpath(os.path.join(THIS_DIR, "..", "motion"))
+if MOTION_DIR not in sys.path:
+    sys.path.append(MOTION_DIR)
+
+import robot_config as cfg
+import vision_bridge
 
 
 def _timestamp_utc() -> str:
@@ -20,9 +30,100 @@ class PerceptionEngine:
         self.last_seen_by_marker = {}
         self.state_lock = threading.Lock()
         self.last_snapshot_log_t = 0.0
+        self.last_change_log_by_marker = {}
         
         self.running = False
         self.worker_thread = None
+
+    def _tracked_marker_context(self, marker_id: int):
+        reference_marker = int(getattr(cfg, "VISION_REFERENCE_MARKER_ID", 0))
+        if marker_id == reference_marker:
+            return "reference", "REF"
+
+        for target_id, mapped_marker_id in dict(getattr(cfg, "VISION_PICK_MARKER_MAP", {})).items():
+            if int(mapped_marker_id) == int(marker_id):
+                return "pickup_block", str(target_id)
+
+        for target_id, mapped_marker_id in dict(getattr(cfg, "VISION_DROP_MARKER_MAP", {})).items():
+            if int(mapped_marker_id) == int(marker_id):
+                return "tower_block", str(target_id)
+
+        return None, None
+
+    def _should_log_marker_change(self, marker_id: int, pose):
+        role, target_id = self._tracked_marker_context(marker_id)
+        if role is None:
+            return False, None
+
+        last_logged_pose = self.last_change_log_by_marker.get(int(marker_id))
+        if last_logged_pose is None:
+            return True, {
+                "reason": "initial",
+                "role": role,
+                "target_id": target_id,
+            }
+
+        xy_delta_mm = (
+            (((float(pose[0]) - float(last_logged_pose[0])) ** 2) + ((float(pose[1]) - float(last_logged_pose[1])) ** 2)) ** 0.5
+        ) * 1000.0
+        z_delta_mm = abs(float(pose[2]) - float(last_logged_pose[2])) * 1000.0
+        rot_delta_rad = max(
+            abs(float(pose[3]) - float(last_logged_pose[3])),
+            abs(float(pose[4]) - float(last_logged_pose[4])),
+            abs(float(pose[5]) - float(last_logged_pose[5])),
+        )
+        if (
+            xy_delta_mm >= float(getattr(cfg, "VISION_MARKER_CHANGE_DELTA_MM", 8.0))
+            or z_delta_mm >= float(getattr(cfg, "VISION_MARKER_CHANGE_DELTA_MM", 8.0))
+            or rot_delta_rad >= float(getattr(cfg, "VISION_MARKER_CHANGE_ROT_DELTA_RAD", 0.15))
+        ):
+            return True, {
+                "reason": "moved",
+                "role": role,
+                "target_id": target_id,
+                "delta_xy_mm": round(float(xy_delta_mm), 3),
+                "delta_z_mm": round(float(z_delta_mm), 3),
+                "delta_rot_rad": round(float(rot_delta_rad), 4),
+            }
+
+        return False, None
+
+    def _log_marker_change(self, marker_id: int, pose) -> None:
+        should_log, meta = self._should_log_marker_change(marker_id, pose)
+        if not should_log or meta is None:
+            return
+
+        robot_xy, robot_xy_reason = vision_bridge.camera_xy_to_robot_xy_mm(float(pose[0]), float(pose[1]))
+        payload = {
+            "event": "marker_pose_changed",
+            "module": "PERCEPTION",
+            "marker_id": int(marker_id),
+            "role": meta["role"],
+            "target_id": meta["target_id"],
+            "change_reason": meta["reason"],
+            "camera_pose": {
+                "x": round(float(pose[0]), 6),
+                "y": round(float(pose[1]), 6),
+                "z": round(float(pose[2]), 6),
+                "roll": round(float(pose[3]), 6),
+                "pitch": round(float(pose[4]), 6),
+                "yaw": round(float(pose[5]), 6),
+            },
+        }
+        if "delta_xy_mm" in meta:
+            payload["delta_xy_mm"] = meta["delta_xy_mm"]
+            payload["delta_z_mm"] = meta["delta_z_mm"]
+            payload["delta_rot_rad"] = meta["delta_rot_rad"]
+        if robot_xy is not None:
+            payload["robot_xy_mm"] = {
+                "x": round(float(robot_xy[0]), 3),
+                "y": round(float(robot_xy[1]), 3),
+            }
+        else:
+            payload["robot_xy_reason"] = robot_xy_reason
+
+        write_jsonl_event("marker_positions", payload)
+        self.last_change_log_by_marker[int(marker_id)] = tuple(float(v) for v in pose)
 
     def update_intrinsics(self, camera_matrix, dist_coeffs):
         self.camera_matrix = camera_matrix
@@ -69,6 +170,9 @@ class PerceptionEngine:
                     },
                 )
                 self.last_snapshot_log_t = now
+
+            for marker_id, pose in poses.items():
+                self._log_marker_change(int(marker_id), pose)
 
         with self.state_lock:
             self.latest_state = poses
