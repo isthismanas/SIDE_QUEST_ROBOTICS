@@ -14,6 +14,7 @@ No import of task_controller — no circular dependency.
 import time
 import os
 import json
+import tempfile
 from uuid import uuid4
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -69,6 +70,10 @@ def _leaderboard_mode_path() -> str:
 
 def _leaderboard_jsonl_path(mode: str) -> str:
     return os.path.join(_current_log_subdir(mode), "leaderboard.jsonl")
+
+
+def _leaderboard_audit_jsonl_path(mode: str) -> str:
+    return os.path.join(_current_log_subdir(mode), "leaderboard_audit.jsonl")
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +143,84 @@ def _load_leaderboard_records(mode: str) -> list:
     return rows
 
 
+def _atomic_write_jsonl(path: str, rows: list[dict]) -> None:
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix="leaderboard_", suffix=".jsonl.tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def override_run_score(
+    *,
+    mode: str,
+    run_id: str,
+    new_final_height: int,
+) -> dict:
+    path = _leaderboard_jsonl_path(mode)
+    rows = _load_leaderboard_records(mode)
+    updated = False
+    original_row = None
+    updated_row = None
+
+    for row in rows:
+        if str(row.get("run_id", "")).strip() != str(run_id).strip():
+            continue
+        original_row = dict(row)
+        row["final_height"] = int(new_final_height)
+        row["score_overridden_at_unix"] = time.time()
+        updated_row = dict(row)
+        updated = True
+        break
+
+    if not updated or original_row is None or updated_row is None:
+        raise ValueError(f"Run not found for override: {run_id}")
+
+    _atomic_write_jsonl(path, rows)
+    return {
+        "path": path,
+        "original": original_row,
+        "updated": updated_row,
+    }
+
+
+def append_score_override_audit(
+    *,
+    mode: str,
+    run_id: str,
+    session_id,
+    participant_name,
+    old_final_height: int,
+    new_final_height: int,
+    reason: str,
+    source: str,
+) -> str:
+    path = _leaderboard_audit_jsonl_path(mode)
+    record = {
+        "timestamp": time.time(),
+        "mode": normalize_leaderboard_mode(mode),
+        "run_id": run_id,
+        "session_id": session_id,
+        "participant_name": participant_name,
+        "old_final_height": int(old_final_height),
+        "new_final_height": int(new_final_height),
+        "reason": reason,
+        "source": source,
+    }
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Scoring / logging functions (parameterized — no module-global reads)
 # ---------------------------------------------------------------------------
@@ -188,8 +271,9 @@ def emit_run_summary(
     run_start_time,
     participant_name,
     current_stack_level,
+    end_time_mono=None,
 ) -> float:
-    now_mono = time.monotonic()
+    now_mono = end_time_mono if end_time_mono is not None else time.monotonic()
     start_ts = run_start_time if run_start_time is not None else now_mono
     duration_s = max(0.0, now_mono - start_ts)
     participant = participant_name.strip() if isinstance(participant_name, str) and participant_name.strip() else "UNKNOWN"
@@ -209,6 +293,7 @@ def finalize_run(
     current_stack_level,
     run_start_time,
     already_finalized: bool,
+    end_time_mono=None,
 ) -> bool:
     """
     Write a finalized run record to leaderboard.jsonl.
@@ -224,7 +309,7 @@ def finalize_run(
     stable_height = int(current_stack_level or 0)
     final_height = max(0, min(stable_height, target_height))
 
-    now_mono = time.monotonic()
+    now_mono = end_time_mono if end_time_mono is not None else time.monotonic()
     start_ts = run_start_time if run_start_time is not None else now_mono
     completion_time_s = max(0.0, now_mono - start_ts)
 
@@ -509,7 +594,10 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
         function fmtTime(v) {
             const n = Number(v);
             if (!Number.isFinite(n)) return '--';
-            return n.toFixed(3) + 's';
+            const clamped = Math.max(0, n);
+            const minutes = Math.floor(clamped / 60);
+            const seconds = clamped - (minutes * 60);
+            return `${String(minutes).padStart(2, '0')}:${seconds.toFixed(2).padStart(5, '0')}`;
         }
 
         function renderRows(entries) {

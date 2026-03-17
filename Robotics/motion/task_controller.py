@@ -118,6 +118,16 @@ run_id = None
 run_finalized = False
 _logged_raw_getpose_probe = False
 current_run_seed = None
+committed_stack_level = 0
+pending_commit_level = None
+pending_commit_deadline = None
+completion_finalize_pending = False
+completion_end_mono = None
+last_finalized_run_id = None
+last_finalized_mode = None
+last_finalized_session_id = None
+last_finalized_participant_name = None
+_score_state_lock = threading.Lock()
 DEBUG_ENABLED = bool(getattr(cfg, "DEBUG_ENABLED", False))
 CONSOLE_QUIET = not DEBUG_ENABLED
 _DEFAULT_LOG_MODULE_LEVELS = dict(getattr(cfg, "LOG_MODULES", {}))
@@ -222,28 +232,133 @@ def log_event(event: str, **fields) -> None:
     return lb.log_event(**payload)
 
 
+def _clear_score_commit_state(*, reset_committed: bool = True) -> None:
+    global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
+    with _score_state_lock:
+        if reset_committed:
+            committed_stack_level = 0
+        pending_commit_level = None
+        pending_commit_deadline = None
+        completion_finalize_pending = False
+        completion_end_mono = None
+
+
+def _set_pending_commit(level: int, deadline_mono: float) -> None:
+    global pending_commit_level, pending_commit_deadline
+    with _score_state_lock:
+        pending_commit_level = int(level)
+        pending_commit_deadline = float(deadline_mono)
+
+
+def _snapshot_score_state() -> tuple[int, object, object, bool]:
+    with _score_state_lock:
+        return committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending
+
+
+def _resolve_official_score(as_of_mono: float | None = None) -> int:
+    effective_now = time.monotonic() if as_of_mono is None else float(as_of_mono)
+    with _score_state_lock:
+        score = int(committed_stack_level or 0)
+        if pending_commit_level is not None and pending_commit_deadline is not None and effective_now >= pending_commit_deadline:
+            score = int(pending_commit_level)
+        return score
+
+
+def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
+    global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, run_finalized
+    global current_pick_index, current_stack_level, holding_block, proposed_place_pose, proposed_place_stack_level
+    global block_attempt_start_ts, drop_committed_this_window, tower_attempt_start_ts, run_start_time, participant_name
+    global current_run_seed, _last_ready_level_printed, last_finalized_run_id, last_finalized_mode
+    global last_finalized_session_id, last_finalized_participant_name, completion_end_mono
+
+    effective_now = time.monotonic() if now_mono is None else float(now_mono)
+    finalize_complete = False
+    latched_end_mono = None
+
+    with _score_state_lock:
+        if pending_commit_level is not None and pending_commit_deadline is not None and effective_now >= pending_commit_deadline:
+            committed_stack_level = int(pending_commit_level)
+            pending_commit_level = None
+            pending_commit_deadline = None
+            finalize_complete = completion_finalize_pending
+            completion_finalize_pending = False
+            latched_end_mono = completion_end_mono
+
+    if not finalize_complete:
+        return False
+
+    lb.emit_run_summary(
+        "COMPLETE",
+        run_start_time=run_start_time,
+        participant_name=participant_name,
+        current_stack_level=_resolve_official_score(effective_now),
+        end_time_mono=latched_end_mono,
+    )
+    if lb.finalize_run(
+        "COMPLETE",
+        ctx=lb_ctx,
+        run_id=run_id,
+        session_id=session_id,
+        participant_name=participant_name,
+        current_stack_level=_resolve_official_score(effective_now),
+        run_start_time=run_start_time,
+        already_finalized=run_finalized,
+        end_time_mono=latched_end_mono,
+    ):
+        run_finalized = True
+        last_finalized_run_id = run_id
+        last_finalized_mode = normalize_leaderboard_mode(lb_ctx.mode)
+        last_finalized_session_id = session_id
+        last_finalized_participant_name = participant_name
+
+    _send_line_to_unity(f"RUN_COMPLETE {current_stack_level}")
+    time.sleep(5.0)
+    console_emit("[STACK] COMPLETE summary emitted (post-wait)", tag="SUMMARY", level="INFO", module="CONTROL", allow_in_quiet=True)
+
+    current_pick_index = 0
+    current_stack_level = 0
+    holding_block = False
+    proposed_place_pose = None
+    proposed_place_stack_level = None
+    block_attempt_start_ts = None
+    drop_committed_this_window = False
+    tower_attempt_start_ts = None
+    run_start_time = None
+    participant_name = None
+    current_run_seed = None
+    cfg.DRIFT_RUNTIME_RUN_SEED = None
+    cfg.DRIFT_RUNTIME_PARTICIPANT = ""
+    _last_ready_level_printed = None
+    _clear_score_commit_state()
+    return True
+
+
 def emit_run_summary(reason: str) -> float:
     return lb.emit_run_summary(
         reason,
         run_start_time=run_start_time,
         participant_name=participant_name,
-        current_stack_level=globals().get("current_stack_level", 0),
+        current_stack_level=_resolve_official_score(),
     )
 
 
 def finalize_run(end_state: str) -> None:
-    global run_finalized
+    global run_finalized, last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
     if lb.finalize_run(
         end_state,
         ctx=lb_ctx,
         run_id=run_id,
         session_id=session_id,
         participant_name=participant_name,
-        current_stack_level=globals().get("current_stack_level", 0),
+        current_stack_level=_resolve_official_score(),
         run_start_time=run_start_time,
         already_finalized=run_finalized,
     ):
         run_finalized = True
+        last_finalized_run_id = run_id
+        last_finalized_mode = normalize_leaderboard_mode(lb_ctx.mode)
+        last_finalized_session_id = session_id
+        last_finalized_participant_name = participant_name
 
 
 def _is_debug_enabled() -> bool:
@@ -587,7 +702,11 @@ def handle_command(cmd_str: str, source: str) -> None:
     global current_zone, current_zone_stack_level, green_place_streak, combo_active
     global run_id, run_finalized, current_run_seed, DEBUG_ENABLED, _last_ready_level_printed
     global LEADERBOARD_MODE, OFFICIAL_EVENT_ID
+    global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
+    global last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
     global _last_nudge_t
+
+    _promote_pending_commit_if_ready()
 
     # Normalize command
     if cmd_str == "COMMIT":
@@ -632,14 +751,69 @@ def handle_command(cmd_str: str, source: str) -> None:
         cfg.DRIFT_RUNTIME_RUN_SEED = None
         cfg.DRIFT_RUNTIME_PARTICIPANT = participant_name
         _last_ready_level_printed = None
+        _clear_score_commit_state()
         _reset_drift_scale_for_run("NAME")
         _send_line_to_unity("NAME_SET")
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
         console_info("CONTROL", f"Participant set: {participant_name}. Ready to START.", essential=True)
         return
 
+    if upper_cmd == "FIXSCORE" or upper_cmd.startswith("FIXSCORE "):
+        if source not in {"ADMIN", "FACILITATOR"}:
+            warn(module, "[LEADERBOARD] FIXSCORE is restricted to ADMIN or FACILITATOR sources.")
+            return
+        parts = cmd_str.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            warn(module, "[LEADERBOARD] Usage: FIXSCORE <n> [optional reason]")
+            return
+        try:
+            new_score = int(parts[1])
+        except ValueError:
+            warn(module, "[LEADERBOARD] FIXSCORE requires an integer score.")
+            return
+        if new_score < 0:
+            warn(module, "[LEADERBOARD] FIXSCORE rejects negative scores.")
+            return
+        target_height = int(getattr(cfg, "TOWER_LEVELS", 7))
+        if new_score > target_height:
+            warn(module, f"[LEADERBOARD] FIXSCORE rejects scores above target height ({target_height}).")
+            return
+        if not last_finalized_run_id or not last_finalized_mode:
+            warn(module, "[LEADERBOARD] No finalized run is available for FIXSCORE.")
+            return
+        reason = parts[2].strip() if len(parts) > 2 else ""
+        try:
+            result = lb.override_run_score(
+                mode=last_finalized_mode,
+                run_id=last_finalized_run_id,
+                new_final_height=new_score,
+            )
+            original = result["original"]
+            updated = result["updated"]
+            lb.append_score_override_audit(
+                mode=last_finalized_mode,
+                run_id=last_finalized_run_id,
+                session_id=original.get("session_id", last_finalized_session_id),
+                participant_name=original.get("participant_name", last_finalized_participant_name),
+                old_final_height=int(original.get("final_height", 0)),
+                new_final_height=int(updated.get("final_height", 0)),
+                reason=reason,
+                source=source,
+            )
+            console_emit(
+                f"[LEADERBOARD] FIXSCORE run_id={last_finalized_run_id} {int(original.get('final_height', 0))} -> {int(updated.get('final_height', 0))}",
+                tag="FACILITATOR",
+                level="INFO",
+                module=module,
+                allow_in_quiet=True,
+            )
+        except Exception as e:
+            warn(module, f"[LEADERBOARD] FIXSCORE failed: {e}")
+        return
+
     if upper_cmd == "TUMBLE":
         # Preempt any in-flight or queued stack continuation immediately.
+        tumble_received_mono = time.monotonic()
         current_session_token = uuid4()
 
         waited = False
@@ -654,9 +828,31 @@ def handle_command(cmd_str: str, source: str) -> None:
 
         controller_busy = True
         # Run summary before any state/session reset
-        blocks_placed = current_stack_level
-        run_time_s = emit_run_summary("TUMBLE")
-        finalize_run("TUMBLE")
+        official_score = _resolve_official_score(tumble_received_mono)
+        blocks_placed = official_score
+        run_time_s = lb.emit_run_summary(
+            "TUMBLE",
+            run_start_time=run_start_time,
+            participant_name=participant_name,
+            current_stack_level=official_score,
+            end_time_mono=tumble_received_mono,
+        )
+        if lb.finalize_run(
+            "TUMBLE",
+            ctx=lb_ctx,
+            run_id=run_id,
+            session_id=session_id,
+            participant_name=participant_name,
+            current_stack_level=official_score,
+            run_start_time=run_start_time,
+            already_finalized=run_finalized,
+            end_time_mono=tumble_received_mono,
+        ):
+            run_finalized = True
+            last_finalized_run_id = run_id
+            last_finalized_mode = normalize_leaderboard_mode(lb_ctx.mode)
+            last_finalized_session_id = session_id
+            last_finalized_participant_name = participant_name
         _send_line_to_unity("RUN_FAIL TUMBLE")
 
         log_event(
@@ -709,6 +905,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         cfg.DRIFT_RUNTIME_RUN_SEED = None
         cfg.DRIFT_RUNTIME_PARTICIPANT = ""
         _last_ready_level_printed = None
+        _clear_score_commit_state()
         if _is_official_mode() and vr_connected:
             console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
         return
@@ -771,6 +968,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             proposed_place_stack_level = None
             current_zone = "GREEN"
             current_zone_stack_level = None
+            _clear_score_commit_state()
         except Exception as e:
             warn(module, f"[{source}] SAFE_RESET failed: {e}")
         return
@@ -965,6 +1163,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 run_start_time = tower_attempt_start_ts
                 run_id = uuid4().hex
                 run_finalized = False
+                _clear_score_commit_state()
                 green_place_streak = 0
                 if combo_active:
                     send_boost_end()
@@ -1398,6 +1597,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             # Update stack counters only on success
             current_stack_level += 1
             current_pick_index += 1
+            _set_pending_commit(current_stack_level, time.monotonic() + 5.0)
 
             tower_complete = current_stack_level >= target_stack_count
 
@@ -1410,6 +1610,15 @@ def handle_command(cmd_str: str, source: str) -> None:
                 info(module, f"[SM] -> {STATE.name} (PLACE_COMPLETE)")
 
                 if tower_complete:
+                    completion_end_mono = time.monotonic()
+                    with _score_state_lock:
+                        if pending_commit_level is not None and pending_commit_deadline is not None and completion_end_mono < pending_commit_deadline:
+                            completion_finalize_pending = True
+                        else:
+                            completion_finalize_pending = False
+                    if completion_finalize_pending:
+                        info(module, "[STACK] COMPLETE awaiting pending score commit window.")
+                        return
                     emit_run_summary("COMPLETE")
                     finalize_run("COMPLETE")
                     _send_line_to_unity(f"RUN_COMPLETE {current_stack_level}")
@@ -1430,6 +1639,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     cfg.DRIFT_RUNTIME_RUN_SEED = None
                     cfg.DRIFT_RUNTIME_PARTICIPANT = ""
                     _last_ready_level_printed = None
+                    _clear_score_commit_state()
                     return
 
                 # Auto-continue stacking if enabled and targets remain
@@ -1527,6 +1737,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 current_zone = "GREEN"
                 current_zone_stack_level = None
                 robot_armed = True
+                _clear_score_commit_state()
             else:
                 warn(module, "[RECOVERY] Recovery reported FAILURE. Setting state to FAULT.")
                 STATE = State.FAULT
@@ -1558,6 +1769,7 @@ def command_server():
     global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
     global green_place_streak, combo_active
     global run_id, run_finalized, current_run_seed
+    global last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
     global _logged_raw_getpose_probe
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1609,6 +1821,7 @@ def command_server():
             current_run_seed = None
             cfg.DRIFT_RUNTIME_RUN_SEED = None
             cfg.DRIFT_RUNTIME_PARTICIPANT = ""
+            _clear_score_commit_state()
 
             # Arm once for this VR session
             try:
@@ -1696,6 +1909,7 @@ def command_server():
                 current_run_seed = None
                 cfg.DRIFT_RUNTIME_RUN_SEED = None
                 cfg.DRIFT_RUNTIME_PARTICIPANT = ""
+                _clear_score_commit_state()
     finally:
         _close_socket_quietly(server)
         _untrack_server_socket(server)
@@ -1805,6 +2019,7 @@ def facilitator_hotkey_loop():
                 info("CONTROL", "  mode dev             -> MODE DEV")
                 info("CONTROL", "  mode official        -> MODE OFFICIAL")
                 info("CONTROL", "  event <id>           -> EVENT <id>")
+                info("CONTROL", "  fixscore <n> [why]   -> FIXSCORE <n> [why]")
                 info("CONTROL", "  debug show           -> DEBUG SHOW")
                 info("CONTROL", "  debug on             -> DEBUG ON")
                 info("CONTROL", "  debug off            -> DEBUG OFF")
@@ -1858,6 +2073,11 @@ def facilitator_hotkey_loop():
                     continue
                 cmd = f"EVENT {event_id}"
                 facilitator_mode_cmd = "EVENT_SET"
+            elif head == "fixscore":
+                if not tail:
+                    warn("CONTROL", "[FACILITATOR] Usage: fixscore <n> [optional reason]")
+                    continue
+                cmd = f"FIXSCORE {tail}"
             else:
                 warn("CONTROL", f"[FACILITATOR] Unknown command: {line} (type 'h' or 'help')")
                 continue
@@ -1919,7 +2139,8 @@ _start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)
 info("CONTROL", "TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
 try:
     while True:
-        time.sleep(1)
+        _promote_pending_commit_if_ready()
+        time.sleep(0.1)
 except KeyboardInterrupt:
     info("CONTROL", "[MAIN] Ctrl+C received. Initiating graceful shutdown...")
     STOP_EVENT.set()
