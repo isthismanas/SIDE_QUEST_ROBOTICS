@@ -517,7 +517,12 @@ def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_lev
     )
 
 
-def move_to_tower_hover(handles: SystemHandles, stack_level: int, target_xy: Optional[tuple[float, float]] = None) -> None:
+def move_to_tower_hover(
+    handles: SystemHandles,
+    stack_level: int,
+    target_xy: Optional[tuple[float, float]] = None,
+    target_id: Optional[str] = None,
+) -> None:
     """
     Move to safe hover position above tower using joint motion (MovJ).
     
@@ -539,6 +544,7 @@ def move_to_tower_hover(handles: SystemHandles, stack_level: int, target_xy: Opt
         handles,
         "move_to_tower_hover",
         stack_level=int(stack_level),
+        target_id=target_id,
         target_xy=target_xy,
         hover_pose=hover_pose,
     )
@@ -573,7 +579,7 @@ def move_to_hover_xy(handles: SystemHandles, target_x: float, target_y: float, s
     robot.movl_pose(hover_xy_pose)
 
 
-def complete_place_neutral_exit(handles: SystemHandles, stack_level: int) -> None:
+def complete_place_neutral_exit(handles: SystemHandles, stack_level: int, target_id: Optional[str] = None) -> None:
     """Final neutral MoveJ after placement, combo-aware."""
     slot = cfg.place_exit_neutral_slot(stack_level)
     target_neutral = cfg.neutral_pose_for_slot(slot)
@@ -581,6 +587,7 @@ def complete_place_neutral_exit(handles: SystemHandles, stack_level: int) -> Non
         handles,
         "complete_place_neutral_exit",
         stack_level=int(stack_level),
+        target_id=target_id,
         neutral_slot=int(slot),
         target_neutral=target_neutral,
     )
@@ -592,6 +599,7 @@ def complete_place_sequence(
     stack_level: int,
     place_pose: Optional[cfg_pose_type] = None,
     perform_neutral_exit: bool = True,
+    target_id: Optional[str] = None,
 ) -> None:
     """
     Deterministic placement completion with hybrid strategy.
@@ -624,6 +632,7 @@ def complete_place_sequence(
         handles,
         "complete_place_sequence",
         stack_level=int(stack_level),
+        target_id=target_id,
         place_pose=place_pose,
         retract_hover_pose=retract_hover_pose,
         perform_neutral_exit=bool(perform_neutral_exit),
@@ -676,7 +685,7 @@ def complete_place_sequence(
         robot.wait_until_idle()
 
     if perform_neutral_exit:
-        complete_place_neutral_exit(handles, stack_level)
+        complete_place_neutral_exit(handles, stack_level, target_id=target_id)
 
 
 # ----------------------------

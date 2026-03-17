@@ -16,7 +16,7 @@ import vision_controller
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE  # NEW: RS485 Modbus gripper driver
 import robot_config as cfg
-from logger import info, warn, error, set_jsonl_context
+from logger import info, warn, error, set_jsonl_context, write_jsonl_event
 
 # --- Add perception module ---
 VISION_MODE_ENABLED = vision_controller.VISION_MODE_ENABLED
@@ -242,6 +242,24 @@ def _sync_json_log_context() -> None:
     )
 
 
+def _current_pick_target_id() -> str | None:
+    try:
+        if 0 <= int(current_pick_index) < len(cfg.PICK_SEQUENCE):
+            return str(cfg.PICK_SEQUENCE[int(current_pick_index)])
+    except Exception:
+        return None
+    return None
+
+
+def _log_inferred_block_state(event_name: str, **fields) -> None:
+    payload = {
+        "event": event_name,
+        "module": "CONTROL",
+    }
+    payload.update(fields)
+    write_jsonl_event("block_state", payload)
+
+
 def _clear_score_commit_state(*, reset_committed: bool = True) -> None:
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
     with _score_state_lock:
@@ -278,6 +296,7 @@ def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, run_finalized
     global current_pick_index, current_stack_level, holding_block, proposed_place_pose, proposed_place_stack_level
     global block_attempt_start_ts, drop_committed_this_window, tower_attempt_start_ts, run_start_time, participant_name
+    global run_id, session_id
     global current_run_seed, _last_ready_level_printed, last_finalized_run_id, last_finalized_mode
     global last_finalized_session_id, last_finalized_participant_name, completion_end_mono
 
@@ -1225,6 +1244,20 @@ def handle_command(cmd_str: str, source: str) -> None:
                     _handle_vision_pick_unavailable(e.reason)
                     return
                 raise
+            try:
+                pick_pose = cfg.pick_target_pose(pick_target_id)
+                hover_pose = cfg.pick_target_hover_pose(pick_target_id)
+            except Exception:
+                pick_pose = None
+                hover_pose = None
+            _log_inferred_block_state(
+                "block_inferred_picked",
+                target_id=pick_target_id,
+                stack_level=int(current_stack_level),
+                source="deterministic_pick",
+                pick_pose=pick_pose,
+                hover_pose=hover_pose,
+            )
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
             if m in (9, 11):
@@ -1267,6 +1300,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         handles,
                         current_stack_level,
                         target_xy=(proposed_place_pose[0], proposed_place_pose[1]),
+                        target_id=pick_target_id,
                     )
                     if not _handle_post_tower_hover(module, my_token):
                         return
@@ -1498,6 +1532,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         try:
             send_ack("DROP")
             my_token = current_session_token
+            placed_target_id = _current_pick_target_id()
             zone_at_commit = "UNKNOWN"
             if current_stack_level is not None and current_stack_level >= 0:
                 nominal_place_pose = cfg.tower_place_pose(current_stack_level)
@@ -1525,12 +1560,14 @@ def handle_command(cmd_str: str, source: str) -> None:
                         current_stack_level,
                         place_pose=proposed_place_pose,
                         perform_neutral_exit=False,
+                        target_id=placed_target_id,
                     )
                 else:
                     actions.complete_place_sequence(
                         handles,
                         current_stack_level,
                         perform_neutral_exit=False,
+                        target_id=placed_target_id,
                     )
                 # Immediate RobotMode check after motion
                 m = handles.robot.robot_mode()
@@ -1582,10 +1619,32 @@ def handle_command(cmd_str: str, source: str) -> None:
                         send_boost_state(green_place_streak, False)
 
                 handles.combo_active = combo_active
-                actions.complete_place_neutral_exit(handles, current_stack_level)
+                actions.complete_place_neutral_exit(handles, current_stack_level, target_id=placed_target_id)
 
                 if current_zone_stack_level == current_stack_level and current_zone == "RED":
                     cfg.DRIFT_SCALE = min(3.0, float(cfg.DRIFT_SCALE) + float(cfg.DRIFT_RISK_INCREMENT))
+                final_place_pose = (
+                    proposed_place_pose
+                    if proposed_place_pose is not None and proposed_place_stack_level == current_stack_level
+                    else cfg.tower_place_pose(current_stack_level)
+                )
+                _log_inferred_block_state(
+                    "block_inferred_placed",
+                    target_id=placed_target_id,
+                    stack_level=int(current_stack_level),
+                    tower_target_id=cfg.build_target_id_for_level(current_stack_level),
+                    zone_at_commit=zone_at_commit,
+                    source="deterministic_place",
+                    place_pose=final_place_pose,
+                    retract_hover_pose=(
+                        final_place_pose[0],
+                        final_place_pose[1],
+                        final_place_pose[2] + cfg.PLACE_CLEARANCE_MM,
+                        final_place_pose[3],
+                        final_place_pose[4],
+                        final_place_pose[5],
+                    ),
+                )
                 holding_block = False
                 proposed_place_pose = None
                 proposed_place_stack_level = None
@@ -1687,6 +1746,20 @@ def handle_command(cmd_str: str, source: str) -> None:
                                 info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
                                 return
                             raise
+                        try:
+                            pick_pose = cfg.pick_target_pose(pick_target_id)
+                            hover_pose = cfg.pick_target_hover_pose(pick_target_id)
+                        except Exception:
+                            pick_pose = None
+                            hover_pose = None
+                        _log_inferred_block_state(
+                            "block_inferred_picked",
+                            target_id=pick_target_id,
+                            stack_level=int(current_stack_level),
+                            source="deterministic_pick",
+                            pick_pose=pick_pose,
+                            hover_pose=hover_pose,
+                        )
                         # Immediate RobotMode check after motion (auto-continue)
                         m = handles.robot.robot_mode()
                         if m in (9, 11):
@@ -1724,6 +1797,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                                     handles,
                                     current_stack_level,
                                     target_xy=(proposed_place_pose[0], proposed_place_pose[1]),
+                                    target_id=pick_target_id,
                                 )
                                 if not _handle_post_tower_hover(module, my_token):
                                     return
