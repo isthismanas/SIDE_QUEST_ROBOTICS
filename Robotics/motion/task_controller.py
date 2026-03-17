@@ -4,9 +4,9 @@ import secrets
 from datetime import timedelta
 import hashlib
 from uuid import uuid4
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
 from state_machine import State, Event, step, parse_event
+import leaderboard as lb
+from leaderboard import normalize_leaderboard_mode
 
 import actions
 from actions import SystemHandles
@@ -128,6 +128,10 @@ OFFICIAL_EVENT_ID = "ARC2026"
 
 LEADERBOARD_PORT = 8090
 
+# Shared mutable context read by the leaderboard HTTP handler at request time.
+# Kept in sync with LEADERBOARD_MODE / OFFICIAL_EVENT_ID whenever they change.
+lb_ctx = lb.LeaderboardContext(mode=LEADERBOARD_MODE, official_event_id=OFFICIAL_EVENT_ID)
+
 
 def _track_server_socket(sock: socket.socket) -> None:
     with _SOCKETS_LOCK:
@@ -195,54 +199,51 @@ def _join_worker_threads(timeout_s: float = 1.0) -> list[str]:
     return alive
 
 
+def _is_official_mode() -> bool:
+    return normalize_leaderboard_mode(LEADERBOARD_MODE) == "OFFICIAL"
+
+
+# ---------------------------------------------------------------------------
+# Thin wrappers — delegate to leaderboard.py, injecting the current globals.
+# Call sites in handle_command are unchanged.
+# ---------------------------------------------------------------------------
+
 def log_event(event: str, **fields) -> None:
-    """Append one JSONL event record to cfg.LOG_DIR."""
-    if _normalize_leaderboard_mode(LEADERBOARD_MODE) != "OFFICIAL":
-        return
-
-    try:
-        log_dir = _current_log_subdir()
-
-        sid = session_id or "no_session"
-        log_path = os.path.join(log_dir, f"session_{sid}.jsonl")
-
-        record = {
-            "timestamp": time.time(),
-            "event": event,
-            "session_id": session_id,
-            "participant_name": participant_name,
-            "state": STATE.name if hasattr(STATE, "name") else str(STATE),
-            "current_stack_level": globals().get("current_stack_level", None),
-            "current_pick_index": globals().get("current_pick_index", None),
-        }
-        if hasattr(cfg, "DRIFT_SCALE"):
-            record["drift_scale"] = cfg.DRIFT_SCALE
-        if fields:
-            record.update(fields)
-
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception as e:
-        warn("CONTROL", f"[LOG] Failed to write event {event}: {e}")
+    payload = {
+        "leaderboard_mode": LEADERBOARD_MODE,
+        "session_id": session_id,
+        "participant_name": participant_name,
+        "state": STATE,
+        "current_stack_level": globals().get("current_stack_level", 0),
+        "current_pick_index": globals().get("current_pick_index", 0),
+        "event_type": event,
+    }
+    payload.update(fields)
+    return lb.log_event(**payload)
 
 
 def emit_run_summary(reason: str) -> float:
-    now_mono = time.monotonic()
-    start_ts = run_start_time if run_start_time is not None else now_mono
-    duration_s = max(0.0, now_mono - start_ts)
-    participant = participant_name.strip() if isinstance(participant_name, str) and participant_name.strip() else "UNKNOWN"
-    placed = int(current_stack_level) if current_stack_level is not None else 0
-    summary_reason = reason.strip().upper() if isinstance(reason, str) and reason.strip() else "UNKNOWN"
-    warn("STACK", f"{participant} successfully placed {placed} blocks in {duration_s:.1f} seconds ({summary_reason})")
-    return duration_s
+    return lb.emit_run_summary(
+        reason,
+        run_start_time=run_start_time,
+        participant_name=participant_name,
+        current_stack_level=globals().get("current_stack_level", 0),
+    )
 
 
-def _normalize_leaderboard_mode(value) -> str:
-    return "OFFICIAL" if str(value).strip().upper() == "OFFICIAL" else "DEV"
-
-
-def _is_official_mode() -> bool:
-    return _normalize_leaderboard_mode(LEADERBOARD_MODE) == "OFFICIAL"
+def finalize_run(end_state: str) -> None:
+    global run_finalized
+    if lb.finalize_run(
+        end_state,
+        ctx=lb_ctx,
+        run_id=run_id,
+        session_id=session_id,
+        participant_name=participant_name,
+        current_stack_level=globals().get("current_stack_level", 0),
+        run_start_time=run_start_time,
+        already_finalized=run_finalized,
+    ):
+        run_finalized = True
 
 
 def _is_debug_enabled() -> bool:
@@ -318,502 +319,11 @@ def _set_debug_enabled(enabled: bool) -> None:
     _apply_console_verbosity()
 
 
-def _current_log_subdir() -> str:
-    mode = _normalize_leaderboard_mode(LEADERBOARD_MODE)
-    base_log_dir = getattr(cfg, "LOG_DIR", "logs")
-    subdir = "official" if mode == "OFFICIAL" else "dev"
-    path = os.path.join(base_log_dir, subdir)
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-def _leaderboard_mode_path() -> str:
-    log_dir = getattr(cfg, "LOG_DIR", "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    return os.path.join(log_dir, "leaderboard_mode.json")
-
-
-def _save_leaderboard_mode() -> None:
-    payload = {
-        "mode": LEADERBOARD_MODE,
-        "official_event_id": OFFICIAL_EVENT_ID,
-        "updated_at_unix": time.time(),
-    }
-    path = _leaderboard_mode_path()
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-    except Exception as e:
-        warn("STACK", f"[LEADERBOARD] Failed to persist mode config: {e}")
-
-
-def _load_leaderboard_mode() -> None:
-    global LEADERBOARD_MODE, OFFICIAL_EVENT_ID
-
-    path = _leaderboard_mode_path()
-    if not os.path.exists(path):
-        _save_leaderboard_mode()
-        return
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception as e:
-        warn("STACK", f"[LEADERBOARD] Failed to read mode config, using defaults: {e}")
-        return
-
-    if isinstance(raw, dict):
-        LEADERBOARD_MODE = _normalize_leaderboard_mode(raw.get("mode", LEADERBOARD_MODE))
-        event_value = str(raw.get("official_event_id", OFFICIAL_EVENT_ID)).strip()
-        OFFICIAL_EVENT_ID = event_value if event_value else OFFICIAL_EVENT_ID
-
-    info("STACK", f"[LEADERBOARD] Mode loaded: mode={LEADERBOARD_MODE} event_id={OFFICIAL_EVENT_ID}")
-
-
-def _leaderboard_jsonl_path() -> str:
-    return os.path.join(_current_log_subdir(), "leaderboard.jsonl")
-
-
-def _compute_completion_time_s() -> float:
-    now_mono = time.monotonic()
-    start_ts = run_start_time if run_start_time is not None else now_mono
-    return max(0.0, now_mono - start_ts)
-
-
-def finalize_run(end_state: str) -> None:
-    global run_finalized
-    if run_finalized:
-        return
-
-    ended_state = str(end_state).strip().upper() if isinstance(end_state, str) else "UNKNOWN"
-    target_height = int(getattr(cfg, "TOWER_LEVELS", 7))
-    stable_height = int(globals().get("current_stack_level", 0) or 0)
-    final_height = max(0, min(stable_height, target_height))
-    completion_time_s = _compute_completion_time_s()
-    finalized_run_id = run_id or uuid4().hex
-    mode = _normalize_leaderboard_mode(LEADERBOARD_MODE)
-    event_id = OFFICIAL_EVENT_ID if mode == "OFFICIAL" else "DEV"
-
-    record = {
-        "run_id": finalized_run_id,
-        "session_id": session_id,
-        "participant_name": participant_name,
-        "end_state": ended_state,
-        "mode": mode,
-        "event_id": event_id,
-        "final_height": final_height,
-        "target_height": target_height,
-        "completion_time_s": round(completion_time_s, 3),
-        "ended_at_unix": time.time(),
-    }
-
-    path = _leaderboard_jsonl_path()
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        run_finalized = True
-        info("STACK", f"[LEADERBOARD] Finalized run_id={finalized_run_id} state={ended_state} height={final_height}/{target_height} time={completion_time_s:.3f}s")
-    except Exception as e:
-        warn("STACK", f"[LEADERBOARD] Failed to append leaderboard record: {e}")
-
-
-def _load_leaderboard_records() -> list[dict]:
-    path = _leaderboard_jsonl_path()
-    if not os.path.exists(path):
-        return []
-
-    rows: list[dict] = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                    if isinstance(row, dict):
-                        rows.append(row)
-                except Exception:
-                    continue
-    except Exception as e:
-        warn("STACK", f"[LEADERBOARD] Failed to read leaderboard: {e}")
-    return rows
-
-
-class _LeaderboardHandler(BaseHTTPRequestHandler):
-    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_html(self, status: int, html: str) -> None:
-        body = html.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_json(self, status: int, payload: dict) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _kiosk_html(self) -> str:
-        return """<!doctype html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>SIDE QUEST LEADERBOARD</title>
-    <style>
-        @font-face {
-            font-family: "Futura Custom";
-            src: local("Futura"), local("Futura PT"), url("/assets/Futura.ttf") format("truetype");
-            font-style: normal;
-            font-weight: 400;
-            font-display: swap;
-        }
-
-        :root {
-            --bg: #07090f;
-            --panel: #0f1420;
-            --line: #253047;
-            --text: #e7edf9;
-            --muted: #9ab0d0;
-            --gold: #f2c94c;
-            --silver: #c0cad6;
-            --bronze: #cd8c5d;
-            --accent: #4db7ff;
-        }
-        * { box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; margin: 0; }
-        body {
-            font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
-            background: #425ba6;
-            color: var(--text);
-            display: flex;
-            align-items: stretch;
-            justify-content: center;
-        }
-        .wrap {
-            width: 100%;
-            padding: 0 0 14px 0;
-            display: grid;
-            grid-template-rows: auto auto auto auto;
-            gap: 4px;
-        }
-        .logo-band {
-            width: 100vw;
-            margin-left: calc(50% - 50vw);
-            margin-right: calc(50% - 50vw);
-            background: linear-gradient(180deg, #16243f 0%, #0f1420 100%);
-            border-bottom: 1px solid #253047;
-            padding: 72px 0;
-            margin-bottom: 4px;
-        }
-        .logo-wrap {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 50px;
-            margin: 0;
-            padding: 0;
-        }
-        .logo {
-            height: 100px;
-            max-width: 26%;
-            object-fit: contain;
-        }
-        h1 {
-            margin: 6px 0 2px 0;
-            letter-spacing: 1px;
-            font-size: clamp(48px, 6.5vw, 96px);
-            text-transform: uppercase;
-            text-align: center;
-            white-space: nowrap;
-            font-family: "Futura Custom", Futura, "Futura PT", "Trebuchet MS", Inter, sans-serif;
-            color: #ffffff;
-        }
-        .subhead {
-            margin: 0 0 10px 0;
-            text-align: center;
-            text-transform: uppercase;
-            letter-spacing: 0.6px;
-            font-size: clamp(24px, 3.25vw, 48px);
-            white-space: nowrap;
-            font-family: "Futura Custom", Futura, "Futura PT", "Trebuchet MS", Inter, sans-serif;
-            color: #ffffff;
-            line-height: 1;
-        }
-        .meta {
-            display: flex;
-            justify-content: center;
-            gap: 18px;
-            color: var(--muted);
-            font-weight: 500;
-            flex-wrap: wrap;
-            margin: 26px 0 0 0;
-            font-size: clamp(12px, 1.1vw, 14px);
-            opacity: 0.8;
-        }
-        .panel {
-            width: min(1200px, 100%);
-            justify-self: center;
-            border: 1px solid var(--line);
-            border-radius: 14px;
-            background: color-mix(in oklab, var(--panel) 92%, black);
-            overflow: hidden;
-            min-height: 0;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: clamp(13px, 1.35vw, 18px);
-            font-family: "Encode Sans", "Encode Sans SemiExpanded", Inter, system-ui, sans-serif;
-        }
-        thead th {
-            text-align: left;
-            color: var(--muted);
-            padding: 9px 12px;
-            border-bottom: 1px solid var(--line);
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-            font-size: 0.75em;
-        }
-        tbody td {
-            padding: 8px 12px;
-            border-bottom: 1px solid #1a2233;
-        }
-        tbody tr { height: 42px; }
-        tbody tr:nth-child(1) { background: linear-gradient(90deg, rgba(242,201,76,0.22), transparent 70%); }
-        tbody tr:nth-child(2) { background: linear-gradient(90deg, rgba(192,202,214,0.20), transparent 70%); }
-        tbody tr:nth-child(3) { background: linear-gradient(90deg, rgba(205,140,93,0.20), transparent 70%); }
-        tbody tr:nth-child(1) td:first-child { color: var(--gold); font-weight: 800; }
-        tbody tr:nth-child(2) td:first-child { color: var(--silver); font-weight: 800; }
-        tbody tr:nth-child(3) td:first-child { color: var(--bronze); font-weight: 800; }
-        tbody tr.empty { background: transparent !important; }
-        tbody tr.empty td:first-child { color: var(--text); font-weight: 400; }
-        .status {
-            min-height: 24px;
-            color: var(--accent);
-            text-align: center;
-            font-weight: 600;
-        }
-    </style>
-</head>
-<body>
-    <div class=\"wrap\">
-        <div class=\"logo-band\">
-            <div class=\"logo-wrap\">
-                <img src=\"/assets/logo1.png\" alt=\"Side Quest Logo\" class=\"logo\">
-                <img src=\"/assets/logo2.png\" alt=\"Side Quest Logo 2\" class=\"logo\">
-                <img src=\"/assets/logo3.png\" alt=\"Side Quest Logo 3\" class=\"logo\">
-                <img src=\"/assets/logo4.png\" alt=\"Side Quest Logo 4\" class=\"logo\">
-                <img src=\"/assets/logo5.png\" alt=\"Side Quest Logo 5\" class=\"logo\">
-            </div>
-        </div>
-        <h1>SIDE QUEST LEADERBOARD</h1>
-        <div class=\"subhead\">HIGH SCORE</div>
-        <div class=\"panel\">
-            <table>
-                <thead>
-                    <tr>
-                        <th style=\"width: 14%\">Rank</th>
-                        <th style=\"width: 46%\">Pilot Name</th>
-                        <th style=\"width: 20%\">Height</th>
-                        <th style=\"width: 20%\">Time</th>
-                    </tr>
-                </thead>
-                <tbody id=\"rows\"></tbody>
-            </table>
-        </div>
-        <div class=\"meta\">
-            <div id=\"mode\">Mode: --</div>
-            <div id=\"event\">Event: --</div>
-        </div>
-        <div class=\"status\" id=\"status\">Waiting for data…</div>
-    </div>
-
-    <script>
-        const qs = new URLSearchParams(window.location.search);
-        if (!qs.has('limit')) qs.set('limit', '10');
-        const targetRows = Math.max(1, Number.parseInt(qs.get('limit') || '10', 10) || 10);
-
-        const modeEl = document.getElementById('mode');
-        const eventEl = document.getElementById('event');
-        const rowsEl = document.getElementById('rows');
-        const statusEl = document.getElementById('status');
-
-        function fmtTime(v) {
-            const n = Number(v);
-            if (!Number.isFinite(n)) return '--';
-            return n.toFixed(3) + 's';
-        }
-
-        function renderRows(entries) {
-            const realEntries = Array.isArray(entries) ? entries : [];
-            let html = '';
-
-            for (let i = 0; i < targetRows; i += 1) {
-                if (i < realEntries.length) {
-                    const row = realEntries[i];
-                    const rank = row.rank ?? '--';
-                    const name = (row.participant_name && String(row.participant_name).trim()) || 'UNKNOWN';
-                    const height = row.final_height ?? '--';
-                    const time = fmtTime(row.completion_time_s);
-                    html += `<tr><td>${rank}</td><td>${name}</td><td>${height}</td><td>${time}</td></tr>`;
-                } else {
-                    html += '<tr class="empty"><td>—</td><td></td><td></td><td></td></tr>';
-                }
-            }
-
-            rowsEl.innerHTML = html;
-        }
-
-        async function tick() {
-            try {
-                const resp = await fetch('/leaderboard?' + qs.toString(), { cache: 'no-store' });
-                if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                const data = await resp.json();
-                modeEl.textContent = 'Mode: ' + (data.mode ?? '--');
-                eventEl.textContent = 'Event: ' + (data.current_official_event_id ?? '--');
-                renderRows(data.entries || []);
-                statusEl.textContent = '';
-            } catch (_err) {
-                modeEl.textContent = 'Mode: --';
-                eventEl.textContent = 'Event: --';
-                rowsEl.innerHTML = '<tr><td colspan=\"4\" style=\"color:#9ab0d0\">Waiting for data…</td></tr>';
-                statusEl.textContent = 'Waiting for data…';
-            }
-        }
-
-        tick();
-        setInterval(tick, 1000);
-    </script>
-</body>
-</html>
-"""
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/assets/"):
-            assets_root = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "assets")
-            )
-            rel_path = parsed.path[len("/assets/"):]
-            requested_path = os.path.abspath(os.path.join(assets_root, rel_path))
-
-            if not requested_path.startswith(assets_root + os.sep):
-                self._send_json(404, {"error": "not_found"})
-                return
-
-            if not os.path.isfile(requested_path):
-                self._send_json(404, {"error": "not_found"})
-                return
-
-            ext = os.path.splitext(requested_path)[1].lower()
-            if ext == ".png":
-                content_type = "image/png"
-            elif ext in {".jpg", ".jpeg"}:
-                content_type = "image/jpeg"
-            elif ext == ".svg":
-                content_type = "image/svg+xml"
-            elif ext == ".ttf":
-                content_type = "font/ttf"
-            elif ext == ".otf":
-                content_type = "font/otf"
-            elif ext == ".woff":
-                content_type = "font/woff"
-            elif ext == ".woff2":
-                content_type = "font/woff2"
-            else:
-                content_type = "application/octet-stream"
-
-            try:
-                with open(requested_path, "rb") as f:
-                    data = f.read()
-                self._send_bytes(200, data, content_type)
-            except Exception:
-                self._send_json(404, {"error": "not_found"})
-            return
-
-        if parsed.path == "/":
-            self._send_html(200, self._kiosk_html())
-            return
-
-        if parsed.path != "/leaderboard":
-            self._send_json(404, {"error": "not_found"})
-            return
-
-        qs = parse_qs(parsed.query)
-        try:
-            limit = int(qs.get("limit", ["10"])[0])
-        except Exception:
-            limit = 10
-        limit = max(1, min(200, limit))
-
-        mode_override = qs.get("mode", [None])[0]
-        effective_mode = _normalize_leaderboard_mode(mode_override) if mode_override else _normalize_leaderboard_mode(LEADERBOARD_MODE)
-        event_override_raw = qs.get("event_id", [None])[0]
-        event_override = str(event_override_raw).strip() if event_override_raw is not None else None
-        if event_override == "":
-            event_override = None
-
-        rows = _load_leaderboard_records()
-        rows = [r for r in rows if _normalize_leaderboard_mode(r.get("mode", "DEV")) == effective_mode]
-        if event_override is not None:
-            rows = [r for r in rows if str(r.get("event_id", "")).strip() == event_override]
-        rows.sort(
-            key=lambda r: (
-                -int(r.get("final_height", 0)),
-                float(r.get("completion_time_s", 1e12)),
-                float(r.get("ended_at_unix", 0.0)),
-            )
-        )
-
-        top = rows[:limit]
-        ranked = []
-        for idx, row in enumerate(top, start=1):
-            item = dict(row)
-            item["rank"] = idx
-            ranked.append(item)
-
-        self._send_json(
-            200,
-            {
-                "mode": effective_mode,
-                "event_id": event_override,
-                "current_official_event_id": OFFICIAL_EVENT_ID,
-                "limit": limit,
-                "count": len(ranked),
-                "entries": ranked,
-            },
-        )
-
-    def log_message(self, format, *args):
-        return
-
-
-def leaderboard_http_server() -> None:
-    server = ThreadingHTTPServer(("0.0.0.0", LEADERBOARD_PORT), _LeaderboardHandler)
-    info("STACK", f"[LEADERBOARD] HTTP server listening on {LEADERBOARD_PORT}")
-    try:
-        while not STOP_EVENT.is_set():
-            server.handle_request()
-    finally:
-        try:
-            server.server_close()
-        except Exception:
-            pass
-
-
-_load_leaderboard_mode()
+# (leaderboard path helpers, record helpers, _LeaderboardHandler, and
+#  leaderboard_http_server have been moved to leaderboard.py)
+lb.load_leaderboard_mode(lb_ctx)
+LEADERBOARD_MODE = lb_ctx.mode
+OFFICIAL_EVENT_ID = lb_ctx.official_event_id
 _apply_console_verbosity()
 _initialize_gripper_on_startup()
 
@@ -1209,13 +719,15 @@ def handle_command(cmd_str: str, source: str) -> None:
 
     if upper_cmd == "MODE DEV":
         LEADERBOARD_MODE = "DEV"
-        _save_leaderboard_mode()
+        lb_ctx.mode = LEADERBOARD_MODE
+        lb.save_leaderboard_mode(lb_ctx)
         console_emit(f"[LEADERBOARD] MODE set to DEV (event_id={OFFICIAL_EVENT_ID})", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
         return
 
     if upper_cmd == "MODE OFFICIAL":
         LEADERBOARD_MODE = "OFFICIAL"
-        _save_leaderboard_mode()
+        lb_ctx.mode = LEADERBOARD_MODE
+        lb.save_leaderboard_mode(lb_ctx)
         console_emit(f"[LEADERBOARD] MODE set to OFFICIAL (event_id={OFFICIAL_EVENT_ID})", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
         return
 
@@ -1240,7 +752,8 @@ def handle_command(cmd_str: str, source: str) -> None:
             warn(module, "[LEADERBOARD] EVENT command requires a non-empty id (e.g., EVENT ARC2026).")
             return
         OFFICIAL_EVENT_ID = new_event_id
-        _save_leaderboard_mode()
+        lb_ctx.official_event_id = OFFICIAL_EVENT_ID
+        lb.save_leaderboard_mode(lb_ctx)
         info(module, f"[LEADERBOARD] EVENT set to {OFFICIAL_EVENT_ID}")
         return
 
@@ -2394,7 +1907,7 @@ def _start_worker_thread(name: str, target, args=(), daemon: bool = False) -> No
 # --- 5. START SYSTEM ---
 _start_worker_thread("command-server", command_server)
 _start_worker_thread("admin-server", admin_server)
-_start_worker_thread("leaderboard-http", leaderboard_http_server)
+_start_worker_thread("leaderboard-http", lb.leaderboard_http_server, args=(lb_ctx, STOP_EVENT, LEADERBOARD_PORT))
 if CAMERA_STREAM_RUNTIME_ENABLED and (dai is not None) and (camera_streamer is not None):
     _start_worker_thread("camera-inspector", camera_server_wrapper, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
     time.sleep(10)
