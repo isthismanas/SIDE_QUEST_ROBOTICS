@@ -7,7 +7,7 @@ from typing import Any
 import block_tracker
 import robot_config as cfg
 import tolerance_engine
-from logger import info, warn
+from logger import info, warn, write_jsonl_event
 
 
 PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
@@ -97,30 +97,53 @@ def _log_block_tracking(context: str, tracking: dict[str, Any], debug_enabled: b
     if not _shadow_logs_enabled():
         return
 
+    event_payload: dict[str, Any] = {
+        "event": "block_track",
+        "module": "CONTROL",
+        "context": context,
+        "configured": bool(tracking.get("configured", False)),
+        "available": bool(tracking.get("available", False)),
+        "reason": str(tracking.get("reason", "unknown")),
+        "role": tracking.get("role"),
+        "target_id": tracking.get("target_id"),
+        "marker_id": tracking.get("marker_id"),
+    }
+
     if not tracking.get("configured", False):
-        if debug_enabled:
-            info(
-                "CONTROL",
-                f"[BLOCK_TRACK] {context} unavailable reason={tracking.get('reason', 'unconfigured')}",
-            )
+        write_jsonl_event("block_track", event_payload)
         return
 
     if not tracking.get("available", False):
-        if debug_enabled:
-            info(
-                "CONTROL",
-                f"[BLOCK_TRACK] {context} marker={tracking.get('marker_id', 'n/a')} "
-                f"unavailable reason={tracking.get('reason', 'unknown')}",
-            )
+        write_jsonl_event("block_track", event_payload)
         return
 
     robot_x, robot_y = tracking["robot_xy"]
     expected_x, expected_y = tracking["expected_xy"]
     err_x, err_y = tracking["axis_error_mm"]
     radial_err = float(tracking["radial_error_mm"])
-    info(
-        "CONTROL",
-        f"[BLOCK_TRACK] {context} marker={tracking['marker_id']} "
-        f"robot_xy=({robot_x:.2f},{robot_y:.2f}) expected_xy=({expected_x:.2f},{expected_y:.2f}) "
-        f"err=({err_x:.2f},{err_y:.2f}) radial_mm={radial_err:.2f}",
+    event_payload.update(
+        {
+            "camera_pose": {
+                "x": round(float(tracking["camera_pose"][0]), 6),
+                "y": round(float(tracking["camera_pose"][1]), 6),
+                "z": round(float(tracking["camera_pose"][2]), 6),
+                "roll": round(float(tracking["camera_pose"][3]), 6),
+                "pitch": round(float(tracking["camera_pose"][4]), 6),
+                "yaw": round(float(tracking["camera_pose"][5]), 6),
+            },
+            "robot_xy_mm": {
+                "x": round(float(robot_x), 3),
+                "y": round(float(robot_y), 3),
+            },
+            "expected_xy_mm": {
+                "x": round(float(expected_x), 3),
+                "y": round(float(expected_y), 3),
+            },
+            "axis_error_mm": {
+                "x": round(float(err_x), 3),
+                "y": round(float(err_y), 3),
+            },
+            "radial_error_mm": round(radial_err, 3),
+        }
     )
+    write_jsonl_event("block_track", event_payload)

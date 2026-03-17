@@ -62,3 +62,6 @@ Robotics/perception/calibration_data/phase2_capture_20260311T091254Z_phase3_asse
 Robotics/perception/calibration_data/blocks
 Robotics/perception/calibration_data/BLOCK_MARKER_PLAN.md
 Robotics/perception/calibration_data/
+Robotics/perception/logs/
+Robotics/perception/logs/*.jsonl
+!Robotics/perception/logs/.gitkeep

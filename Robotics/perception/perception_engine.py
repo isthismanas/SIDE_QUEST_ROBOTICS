@@ -2,7 +2,7 @@ import threading
 import time
 import cv2
 from aruco_tracker import ArucoTracker
-from logger import info, warn
+from logger import info, warn, write_jsonl_event
 
 class PerceptionEngine:
     def __init__(self, camera_matrix=None, dist_coeffs=None):
@@ -11,7 +11,7 @@ class PerceptionEngine:
         self.dist_coeffs = dist_coeffs
         self.latest_state = {}
         self.state_lock = threading.Lock()
-        self.last_log_by_marker = {}
+        self.last_snapshot_log_t = 0.0
         
         self.running = False
         self.worker_thread = None
@@ -29,12 +29,36 @@ class PerceptionEngine:
         
         if poses:
             now = time.monotonic()
-            for m_id, pose in poses.items():
-                x, y, z, roll, pitch, yaw = pose
-                last_log_t = self.last_log_by_marker.get(int(m_id), 0.0)
-                if (now - last_log_t) >= 1.0:
-                    info("PERCEPTION", f"Detected Marker {m_id} at XYZ: ({x:.3f}, {y:.3f}, {z:.3f})")
-                    self.last_log_by_marker[int(m_id)] = now
+            if (now - self.last_snapshot_log_t) >= 1.0:
+                marker_snapshot = []
+                for m_id in sorted(poses):
+                    x, y, z, roll, pitch, yaw = poses[m_id]
+                    marker_snapshot.append(
+                        {
+                            "marker_id": int(m_id),
+                            "position_m": {
+                                "x": round(float(x), 6),
+                                "y": round(float(y), 6),
+                                "z": round(float(z), 6),
+                            },
+                            "rotation_rad": {
+                                "roll": round(float(roll), 6),
+                                "pitch": round(float(pitch), 6),
+                                "yaw": round(float(yaw), 6),
+                            },
+                        }
+                    )
+
+                write_jsonl_event(
+                    "aruco_tracker",
+                    {
+                        "event": "aruco_snapshot",
+                        "module": "PERCEPTION",
+                        "marker_count": len(marker_snapshot),
+                        "markers": marker_snapshot,
+                    },
+                )
+                self.last_snapshot_log_t = now
 
         with self.state_lock:
             self.latest_state = poses

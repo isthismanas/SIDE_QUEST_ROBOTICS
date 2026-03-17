@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
+from datetime import datetime, timezone
+from threading import Lock
+from typing import Any
+
 from robot_config import LOG_LEVEL, LOG_MODULES, RUN_MODE
 
 
@@ -20,6 +26,11 @@ _LEGACY_PREFIXES = (
 	"[DOBOT]",
 	"[STACK]",
 	"[DRIFT]",
+)
+
+_JSON_LOG_LOCK = Lock()
+_PERCEPTION_LOG_DIR = os.path.normpath(
+	os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception", "logs")
 )
 
 
@@ -64,6 +75,22 @@ def _strip_leading_module_prefix(module_tag: str, msg: str) -> str:
 	return text
 
 
+def _timestamp_utc() -> str:
+	return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def write_jsonl_event(stream_name: str, event: dict[str, Any]) -> str:
+	os.makedirs(_PERCEPTION_LOG_DIR, exist_ok=True)
+	file_path = os.path.join(_PERCEPTION_LOG_DIR, f"{stream_name}.jsonl")
+	record = {"ts_utc": _timestamp_utc(), **event}
+	line = json.dumps(record, separators=(",", ":"), sort_keys=True)
+	with _JSON_LOG_LOCK:
+		with open(file_path, "a", encoding="utf-8") as handle:
+			handle.write(line)
+			handle.write("\n")
+	return file_path
+
+
 def log(module: str, level: str, msg: str) -> None:
 	if is_enabled(module, level):
 		module_tag = _normalize_module(module) or "UNKNOWN"
@@ -100,4 +127,3 @@ def warn(module: str, msg: str) -> None:
 
 def error(module: str, msg: str) -> None:
 	log(module, "ERROR", msg)
-
