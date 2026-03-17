@@ -409,26 +409,15 @@ def movj_pose_combo(handles: SystemHandles, pose: cfg_pose_type) -> str:
 # Stacking: Pick & Place (Hybrid MovJ/MovL)
 # ----------------------------
 
-def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_level: int) -> None:
-    """
-    Deterministic pick sequence with hybrid strategy.
-    - MovJ to hover zone (joint motion, faster)
-    - MovL vertical descent to block (linear, controlled)
-    - Close gripper
-    - MovL vertical retract
-    - MovJ to neutral exit pose
-
-    Args:
-        pick_target_id: pickup target id (legacy: L4/R3..., plate: P1..P7)
-        stack_level: 0-indexed build level used for neutral gateway selection
-    """
+def _execute_pick_with_pose(
+    handles: SystemHandles,
+    pick_pose: cfg_pose_type,
+    stack_level: int,
+    target_label: str,
+    motion_name: str,
+) -> None:
     robot = handles.robot
     gripper = handles.gripper
-
-    provider = _active_pick_pose_provider()
-    pick_pose, reason = provider.get_pick_pose(pick_target_id)
-    if pick_pose is None:
-        raise PickPoseUnavailableError(reason)
 
     hover_pose = (
         pick_pose[0],
@@ -445,15 +434,15 @@ def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_lev
 
     _log_motion_trigger(
         handles,
-        "execute_pick_sequence",
-        target_id=pick_target_id,
+        motion_name,
+        target_id=target_label,
         stack_level=int(stack_level),
         pick_pose=pick_pose,
         hover_pose=hover_pose,
         pre_neutral_slot=int(pre_slot),
         post_neutral_slot=int(post_slot),
     )
-    info("STACK", f"pick target={pick_target_id} lvl={stack_level} pre_neutral={pre_slot} post_neutral={post_slot} pick_pose={pick_pose}")
+    info("STACK", f"pick target={target_label} lvl={stack_level} pre_neutral={pre_slot} post_neutral={post_slot} pick_pose={pick_pose}")
     debug("STACK", f"pick hover_pose={hover_pose}")
 
     # Route through neutral gateway before entering pickup zone
@@ -482,6 +471,50 @@ def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_lev
 
     # Joint exit to neutral gateway for this block
     movj_pose_combo(handles, post_neutral)
+
+
+def execute_pick_pose(handles: SystemHandles, pick_pose: cfg_pose_type, stack_level: int, target_label: str = "explicit_pick") -> None:
+    """
+    Execute the standard safe pick path using an explicit Cartesian pick pose.
+
+    This is intended for guarded lab tooling where perception computes the XY
+    but we still want to reuse the same neutral/hover/descent/retract motion
+    path as the deterministic runtime.
+    """
+    _execute_pick_with_pose(
+        handles=handles,
+        pick_pose=pick_pose,
+        stack_level=stack_level,
+        target_label=target_label,
+        motion_name="execute_pick_pose",
+    )
+
+
+def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_level: int) -> None:
+    """
+    Deterministic pick sequence with hybrid strategy.
+    - MovJ to hover zone (joint motion, faster)
+    - MovL vertical descent to block (linear, controlled)
+    - Close gripper
+    - MovL vertical retract
+    - MovJ to neutral exit pose
+
+    Args:
+        pick_target_id: pickup target id (legacy: L4/R3..., plate: P1..P7)
+        stack_level: 0-indexed build level used for neutral gateway selection
+    """
+    provider = _active_pick_pose_provider()
+    pick_pose, reason = provider.get_pick_pose(pick_target_id)
+    if pick_pose is None:
+        raise PickPoseUnavailableError(reason)
+
+    _execute_pick_with_pose(
+        handles=handles,
+        pick_pose=pick_pose,
+        stack_level=stack_level,
+        target_label=pick_target_id,
+        motion_name="execute_pick_sequence",
+    )
 
 
 def move_to_tower_hover(handles: SystemHandles, stack_level: int, target_xy: Optional[tuple[float, float]] = None) -> None:
