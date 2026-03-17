@@ -103,6 +103,9 @@ VISION_ASSIST_ENABLED = True       # calibrated perception in shadow mode; does 
 VISION_REFERENCE_MARKER_ID = 0     # marker used for camera-to-robot reference tracking
 VISION_SHADOW_LOGS_ENABLED = True  # logs vision-derived comparisons without changing authority
 VISION_TRACK_FRESHNESS_S = 1.5     # observational tracking accepts markers seen within this recent window
+VISION_PICK_TEMPLATE_TARGET = "P3"  # provides fixed Z/orientation for single-shot perception picks
+VISION_PICK_WORKSPACE_X_MM = (210.0, 430.0)  # bounded XY workspace for arbitrary-on-plane perception picks
+VISION_PICK_WORKSPACE_Y_MM = (-80.0, 60.0)
 VISION_CALIBRATION_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",

@@ -64,10 +64,28 @@ def parse_args() -> argparse.Namespace:
         help="Maximum allowed median-window std on camera-frame X and Y before a pick is considered stable.",
     )
     parser.add_argument(
-        "--max-offset-mm",
+        "--workspace-x-min-mm",
         type=float,
-        default=40.0,
-        help="Maximum allowed XY deviation from the mapped deterministic pickup target.",
+        default=None,
+        help="Optional override for safe pickup workspace minimum X in robot mm.",
+    )
+    parser.add_argument(
+        "--workspace-x-max-mm",
+        type=float,
+        default=None,
+        help="Optional override for safe pickup workspace maximum X in robot mm.",
+    )
+    parser.add_argument(
+        "--workspace-y-min-mm",
+        type=float,
+        default=None,
+        help="Optional override for safe pickup workspace minimum Y in robot mm.",
+    )
+    parser.add_argument(
+        "--workspace-y-max-mm",
+        type=float,
+        default=None,
+        help="Optional override for safe pickup workspace maximum Y in robot mm.",
     )
     parser.add_argument(
         "--stack-level",
@@ -106,6 +124,20 @@ def _infer_stack_level(target_id: str) -> int:
     if target_key in sequence:
         return int(sequence.index(target_key))
     return 0
+
+
+def _workspace_bounds(args: argparse.Namespace) -> tuple[tuple[float, float], tuple[float, float]]:
+    cfg_x = tuple(float(v) for v in getattr(cfg, "VISION_PICK_WORKSPACE_X_MM", (210.0, 430.0)))
+    cfg_y = tuple(float(v) for v in getattr(cfg, "VISION_PICK_WORKSPACE_Y_MM", (-80.0, 60.0)))
+    x_bounds = (
+        float(args.workspace_x_min_mm) if args.workspace_x_min_mm is not None else cfg_x[0],
+        float(args.workspace_x_max_mm) if args.workspace_x_max_mm is not None else cfg_x[1],
+    )
+    y_bounds = (
+        float(args.workspace_y_min_mm) if args.workspace_y_min_mm is not None else cfg_y[0],
+        float(args.workspace_y_max_mm) if args.workspace_y_max_mm is not None else cfg_y[1],
+    )
+    return x_bounds, y_bounds
 
 
 def _write_grab_pick_event(event_name: str, **fields) -> None:
@@ -152,17 +184,24 @@ def _wait_for_stable_summary(session: CaptureSession, marker_id: int, min_sample
     )
 
 
-def _plan_pick_from_marker(marker_id: int, summary: dict[str, object], max_offset_mm: float, stack_level_override: int | None):
+def _plan_pick_from_marker(
+    marker_id: int,
+    summary: dict[str, object],
+    stack_level_override: int | None,
+    workspace_x_mm: tuple[float, float],
+    workspace_y_mm: tuple[float, float],
+):
     reverse_map = _reverse_pick_marker_map()
-    if marker_id not in reverse_map:
-        raise RuntimeError(
-            f"Marker {marker_id} is not mapped in VISION_PICK_MARKER_MAP. "
-            "Guarded grab_pick currently only allows configured pickup markers."
-        )
-
-    target_id = reverse_map[marker_id]
-    template_pose = cfg.pick_target_pose(target_id)
-    stack_level = _infer_stack_level(target_id) if stack_level_override is None else int(stack_level_override)
+    target_id = reverse_map.get(marker_id, f"marker_{marker_id}")
+    template_target_id = reverse_map.get(
+        marker_id,
+        str(getattr(cfg, "VISION_PICK_TEMPLATE_TARGET", "P3")).strip().upper(),
+    )
+    template_pose = cfg.pick_target_pose(template_target_id)
+    if stack_level_override is None:
+        stack_level = _infer_stack_level(target_id) if marker_id in reverse_map else 0
+    else:
+        stack_level = int(stack_level_override)
 
     median_pose = summary["median_pose"]
     camera_x_m = float(median_pose["x_m"])
@@ -171,26 +210,31 @@ def _plan_pick_from_marker(marker_id: int, summary: dict[str, object], max_offse
     if robot_xy is None:
         raise RuntimeError(f"camera_xy_to_robot_xy_mm failed: {reason}")
 
-    err_x = float(robot_xy[0]) - float(template_pose[0])
-    err_y = float(robot_xy[1]) - float(template_pose[1])
-    if abs(err_x) > float(max_offset_mm) or abs(err_y) > float(max_offset_mm):
+    robot_x = float(robot_xy[0])
+    robot_y = float(robot_xy[1])
+    if not (workspace_x_mm[0] <= robot_x <= workspace_x_mm[1]):
         raise RuntimeError(
-            f"Perception pick offset exceeds guard band: "
-            f"err_x={err_x:.3f}mm err_y={err_y:.3f}mm max_offset_mm={max_offset_mm:.3f}"
+            f"Computed pick X={robot_x:.3f}mm is outside workspace bounds "
+            f"[{workspace_x_mm[0]:.3f}, {workspace_x_mm[1]:.3f}]"
+        )
+    if not (workspace_y_mm[0] <= robot_y <= workspace_y_mm[1]):
+        raise RuntimeError(
+            f"Computed pick Y={robot_y:.3f}mm is outside workspace bounds "
+            f"[{workspace_y_mm[0]:.3f}, {workspace_y_mm[1]:.3f}]"
         )
 
     pick_pose = (
-        float(robot_xy[0]),
-        float(robot_xy[1]),
+        robot_x,
+        robot_y,
         float(template_pose[2]),
         float(template_pose[3]),
         float(template_pose[4]),
         float(template_pose[5]),
     )
-    hover_pose = cfg.pick_target_hover_pose(target_id)
+    hover_pose = cfg.pick_target_hover_pose(template_target_id)
     planned_hover_pose = (
-        float(robot_xy[0]),
-        float(robot_xy[1]),
+        robot_x,
+        robot_y,
         float(hover_pose[2]),
         float(hover_pose[3]),
         float(hover_pose[4]),
@@ -199,12 +243,14 @@ def _plan_pick_from_marker(marker_id: int, summary: dict[str, object], max_offse
     return {
         "marker_id": int(marker_id),
         "target_id": target_id,
+        "template_target_id": template_target_id,
         "stack_level": int(stack_level),
         "template_pose": template_pose,
         "planned_pick_pose": pick_pose,
         "planned_hover_pose": planned_hover_pose,
         "camera_pose_summary": summary,
-        "axis_error_mm": (err_x, err_y),
+        "workspace_x_mm": workspace_x_mm,
+        "workspace_y_mm": workspace_y_mm,
     }
 
 
@@ -297,31 +343,31 @@ def main() -> int:
         )
         print("[GRAB_PICK] stable summary " + _format_pose_block(summary))
 
+        workspace_x_mm, workspace_y_mm = _workspace_bounds(args)
         plan = _plan_pick_from_marker(
             marker_id=marker_id,
             summary=summary,
-            max_offset_mm=float(args.max_offset_mm),
             stack_level_override=args.stack_level,
+            workspace_x_mm=workspace_x_mm,
+            workspace_y_mm=workspace_y_mm,
         )
-        err_x, err_y = plan["axis_error_mm"]
         print(
             "[GRAB_PICK] plan "
             f"target={plan['target_id']} stack_level={plan['stack_level']} "
             f"pick_xy=({plan['planned_pick_pose'][0]:.3f},{plan['planned_pick_pose'][1]:.3f}) "
-            f"err_mm=({err_x:.3f},{err_y:.3f})"
+            f"workspace_x={workspace_x_mm} workspace_y={workspace_y_mm}"
         )
         _write_grab_pick_event(
             "grab_pick_plan",
             marker_id=marker_id,
             target_id=plan["target_id"],
+            template_target_id=plan["template_target_id"],
             stack_level=int(plan["stack_level"]),
             planned_pick_pose=plan["planned_pick_pose"],
             planned_hover_pose=plan["planned_hover_pose"],
             template_pose=plan["template_pose"],
-            axis_error_mm={
-                "x": round(float(err_x), 3),
-                "y": round(float(err_y), 3),
-            },
+            workspace_x_mm=list(workspace_x_mm),
+            workspace_y_mm=list(workspace_y_mm),
             camera_pose_summary=summary,
         )
 
