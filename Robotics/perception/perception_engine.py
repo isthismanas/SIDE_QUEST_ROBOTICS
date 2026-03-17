@@ -28,6 +28,7 @@ class PerceptionEngine:
         self.dist_coeffs = dist_coeffs
         self.latest_state = {}
         self.last_seen_by_marker = {}
+        self.invalidated_markers = set()
         self.state_lock = threading.Lock()
         self.last_snapshot_log_t = 0.0
         self.last_change_log_by_marker = {}
@@ -72,11 +73,15 @@ class PerceptionEngine:
             abs(float(pose[4]) - float(last_logged_pose[4])),
             abs(float(pose[5]) - float(last_logged_pose[5])),
         )
-        if (
+        translation_moved = (
             xy_delta_mm >= float(getattr(cfg, "VISION_MARKER_CHANGE_DELTA_MM", 8.0))
             or z_delta_mm >= float(getattr(cfg, "VISION_MARKER_CHANGE_DELTA_MM", 8.0))
-            or rot_delta_rad >= float(getattr(cfg, "VISION_MARKER_CHANGE_ROT_DELTA_RAD", 0.15))
-        ):
+        )
+        rotation_moved = (
+            bool(getattr(cfg, "VISION_MARKER_CHANGE_LOG_ROTATION", False))
+            and rot_delta_rad >= float(getattr(cfg, "VISION_MARKER_CHANGE_ROT_DELTA_RAD", 0.15))
+        )
+        if translation_moved or rotation_moved:
             return True, {
                 "reason": "moved",
                 "role": role,
@@ -199,7 +204,32 @@ class PerceptionEngine:
                 "pose": tuple(record["pose"]),
                 "age_s": age_s,
                 "last_seen_utc": str(record["seen_utc"]),
+                "invalidated": bool(int(marker_id) in self.invalidated_markers),
             }
+
+    def invalidate_marker(self, marker_id: int) -> None:
+        with self.state_lock:
+            self.invalidated_markers.add(int(marker_id))
+
+    def reset_marker_memory(self, marker_ids=None) -> None:
+        with self.state_lock:
+            if marker_ids is None:
+                self.latest_state = {}
+                self.last_seen_by_marker = {}
+                self.last_change_log_by_marker = {}
+                self.invalidated_markers.clear()
+                return
+
+            marker_ids = {int(marker_id) for marker_id in marker_ids}
+            self.latest_state = {
+                int(marker_id): pose
+                for marker_id, pose in self.latest_state.items()
+                if int(marker_id) not in marker_ids
+            }
+            for marker_id in marker_ids:
+                self.last_seen_by_marker.pop(int(marker_id), None)
+                self.last_change_log_by_marker.pop(int(marker_id), None)
+                self.invalidated_markers.discard(int(marker_id))
 
     def start_worker(self, queueL, queueR):
         """

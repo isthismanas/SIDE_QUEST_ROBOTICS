@@ -784,6 +784,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         _last_ready_level_printed = None
         _clear_score_commit_state()
         _reset_drift_scale_for_run("NAME")
+        vision_controller.reset_pick_tracking_memory()
         _sync_json_log_context()
         _send_line_to_unity("NAME_SET")
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
@@ -1258,6 +1259,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 pick_pose=pick_pose,
                 hover_pose=hover_pose,
             )
+            vision_controller.forget_pick_target(pick_target_id)
             # Immediate RobotMode check after motion
             m = handles.robot.robot_mode()
             if m in (9, 11):
@@ -1760,6 +1762,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                             pick_pose=pick_pose,
                             hover_pose=hover_pose,
                         )
+                        vision_controller.forget_pick_target(pick_target_id)
                         # Immediate RobotMode check after motion (auto-continue)
                         m = handles.robot.robot_mode()
                         if m in (9, 11):

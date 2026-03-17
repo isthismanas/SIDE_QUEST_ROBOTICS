@@ -8,6 +8,8 @@ import tolerance_engine
 import vision_bridge
 
 TRACK_FRESHNESS_S = float(getattr(cfg, "VISION_TRACK_FRESHNESS_S", 1.5))
+PICK_OBJECT_PERMANENCE_ENABLED = bool(getattr(cfg, "VISION_PICK_OBJECT_PERMANENCE_ENABLED", True))
+PICK_OBJECT_PERMANENCE_MAX_AGE_S = float(getattr(cfg, "VISION_PICK_OBJECT_PERMANENCE_MAX_AGE_S", 300.0))
 
 
 def _tracking_state() -> dict[int, tuple[float, float, float, float, float, float]]:
@@ -33,6 +35,30 @@ def _last_seen_marker(marker_id: int) -> Optional[dict[str, Any]]:
         return None
 
 
+def _invalidate_marker(marker_id: int) -> None:
+    engine = getattr(tolerance_engine, "perc_engine", None)
+    if engine is None:
+        return
+    try:
+        invalidator = getattr(engine, "invalidate_marker", None)
+        if invalidator is not None:
+            invalidator(int(marker_id))
+    except Exception:
+        return
+
+
+def _reset_marker_memory(marker_ids: list[int] | None = None) -> None:
+    engine = getattr(tolerance_engine, "perc_engine", None)
+    if engine is None:
+        return
+    try:
+        resetter = getattr(engine, "reset_marker_memory", None)
+        if resetter is not None:
+            resetter(marker_ids)
+    except Exception:
+        return
+
+
 def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tuple[float, float, float, float, float, float], role: str) -> dict[str, Any]:
     marker_id = marker_map.get(target_id)
     if marker_id is None:
@@ -48,6 +74,7 @@ def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tup
     marker_pose = tracking_state.get(int(marker_id))
     age_s = 0.0
     last_seen_utc = None
+    observation_source = "live"
     if marker_pose is None:
         last_seen = _last_seen_marker(int(marker_id))
         if last_seen is None:
@@ -61,7 +88,25 @@ def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tup
             }
 
         age_s = float(last_seen["age_s"])
-        if age_s > TRACK_FRESHNESS_S:
+        invalidated = bool(last_seen.get("invalidated", False))
+        if invalidated:
+            return {
+                "configured": True,
+                "available": False,
+                "reason": "marker_invalidated_after_pick",
+                "role": role,
+                "target_id": target_id,
+                "marker_id": int(marker_id),
+                "last_seen_age_s": age_s,
+                "last_seen_utc": last_seen["last_seen_utc"],
+            }
+
+        permanence_allowed = (
+            role == "pick"
+            and PICK_OBJECT_PERMANENCE_ENABLED
+            and age_s <= PICK_OBJECT_PERMANENCE_MAX_AGE_S
+        )
+        if not permanence_allowed and age_s > TRACK_FRESHNESS_S:
             return {
                 "configured": True,
                 "available": False,
@@ -77,6 +122,7 @@ def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tup
         marker_pose = tuple(last_seen["pose"])
         age_s = float(last_seen["age_s"])
         last_seen_utc = str(last_seen["last_seen_utc"])
+        observation_source = "cached_memory" if permanence_allowed else "recent_last_seen"
     else:
         last_seen = _last_seen_marker(int(marker_id))
         age_s = float(last_seen["age_s"]) if last_seen is not None else 0.0
@@ -116,6 +162,7 @@ def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tup
         "last_seen_age_s": age_s,
         "last_seen_utc": last_seen_utc,
         "freshness_window_s": TRACK_FRESHNESS_S,
+        "observation_source": observation_source,
         "robot_xy": robot_xy,
         "expected_xy": (expected_pose[0], expected_pose[1]),
         "axis_error_mm": (err_x, err_y),
@@ -138,3 +185,16 @@ def track_drop_target(target_id: str) -> dict[str, Any]:
 def track_drop_level(level: int) -> dict[str, Any]:
     target_id = cfg.build_target_id_for_level(level)
     return track_drop_target(target_id)
+
+
+def forget_pick_target(target_id: str) -> None:
+    marker_map = dict(getattr(cfg, "VISION_PICK_MARKER_MAP", {}))
+    marker_id = marker_map.get(str(target_id))
+    if marker_id is not None:
+        _invalidate_marker(int(marker_id))
+
+
+def reset_pick_tracking_memory() -> None:
+    marker_map = dict(getattr(cfg, "VISION_PICK_MARKER_MAP", {}))
+    marker_ids = [int(marker_id) for marker_id in marker_map.values()]
+    _reset_marker_memory(marker_ids)

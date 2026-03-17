@@ -93,6 +93,14 @@ def log_drop_tracking(stack_level: int, debug_enabled: bool = False) -> None:
     )
 
 
+def forget_pick_target(target_id: str) -> None:
+    block_tracker.forget_pick_target(target_id)
+
+
+def reset_pick_tracking_memory() -> None:
+    block_tracker.reset_pick_tracking_memory()
+
+
 def _log_block_tracking(context: str, tracking: dict[str, Any], debug_enabled: bool = False) -> None:
     if not _shadow_logs_enabled():
         return
@@ -114,6 +122,8 @@ def _log_block_tracking(context: str, tracking: dict[str, Any], debug_enabled: b
         event_payload["last_seen_utc"] = str(tracking["last_seen_utc"])
     if tracking.get("freshness_window_s") is not None:
         event_payload["freshness_window_s"] = round(float(tracking["freshness_window_s"]), 3)
+    if tracking.get("observation_source") is not None:
+        event_payload["observation_source"] = str(tracking["observation_source"])
 
     if not tracking.get("configured", False):
         write_jsonl_event("block_track", event_payload)
