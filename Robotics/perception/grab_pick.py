@@ -251,6 +251,7 @@ def _plan_pick_from_marker(
         "camera_pose_summary": summary,
         "workspace_x_mm": workspace_x_mm,
         "workspace_y_mm": workspace_y_mm,
+        "computed_robot_xy_mm": (robot_x, robot_y),
     }
 
 
@@ -344,13 +345,36 @@ def main() -> int:
         print("[GRAB_PICK] stable summary " + _format_pose_block(summary))
 
         workspace_x_mm, workspace_y_mm = _workspace_bounds(args)
-        plan = _plan_pick_from_marker(
-            marker_id=marker_id,
-            summary=summary,
-            stack_level_override=args.stack_level,
-            workspace_x_mm=workspace_x_mm,
-            workspace_y_mm=workspace_y_mm,
-        )
+        try:
+            plan = _plan_pick_from_marker(
+                marker_id=marker_id,
+                summary=summary,
+                stack_level_override=args.stack_level,
+                workspace_x_mm=workspace_x_mm,
+                workspace_y_mm=workspace_y_mm,
+            )
+        except Exception as exc:
+            median_pose = summary["median_pose"]
+            robot_xy, robot_xy_reason = vision_bridge.camera_xy_to_robot_xy_mm(
+                float(median_pose["x_m"]),
+                float(median_pose["y_m"]),
+            )
+            failure_payload = {
+                "marker_id": marker_id,
+                "workspace_x_mm": list(workspace_x_mm),
+                "workspace_y_mm": list(workspace_y_mm),
+                "camera_pose_summary": summary,
+                "error": str(exc),
+            }
+            if robot_xy is not None:
+                failure_payload["computed_robot_xy_mm"] = {
+                    "x": round(float(robot_xy[0]), 3),
+                    "y": round(float(robot_xy[1]), 3),
+                }
+            else:
+                failure_payload["computed_robot_xy_reason"] = robot_xy_reason
+            _write_grab_pick_event("grab_pick_plan_rejected", **failure_payload)
+            raise
         print(
             "[GRAB_PICK] plan "
             f"target={plan['target_id']} stack_level={plan['stack_level']} "
@@ -366,6 +390,10 @@ def main() -> int:
             planned_pick_pose=plan["planned_pick_pose"],
             planned_hover_pose=plan["planned_hover_pose"],
             template_pose=plan["template_pose"],
+            computed_robot_xy_mm={
+                "x": round(float(plan["computed_robot_xy_mm"][0]), 3),
+                "y": round(float(plan["computed_robot_xy_mm"][1]), 3),
+            },
             workspace_x_mm=list(workspace_x_mm),
             workspace_y_mm=list(workspace_y_mm),
             camera_pose_summary=summary,
