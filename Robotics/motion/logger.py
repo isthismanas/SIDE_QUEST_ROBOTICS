@@ -29,6 +29,7 @@ _LEGACY_PREFIXES = (
 )
 
 _JSON_LOG_LOCK = Lock()
+_JSON_LOG_CONTEXT: dict[str, Any] = {}
 _PERCEPTION_LOG_DIR = os.path.normpath(
 	os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perception", "logs")
 )
@@ -79,12 +80,30 @@ def _timestamp_utc() -> str:
 	return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def set_jsonl_context(**context: Any) -> None:
+	with _JSON_LOG_LOCK:
+		for key, value in context.items():
+			if value is None:
+				_JSON_LOG_CONTEXT.pop(str(key), None)
+			else:
+				_JSON_LOG_CONTEXT[str(key)] = value
+
+
+def clear_jsonl_context(*keys: str) -> None:
+	with _JSON_LOG_LOCK:
+		if not keys:
+			_JSON_LOG_CONTEXT.clear()
+			return
+		for key in keys:
+			_JSON_LOG_CONTEXT.pop(str(key), None)
+
+
 def write_jsonl_event(stream_name: str, event: dict[str, Any]) -> str:
 	os.makedirs(_PERCEPTION_LOG_DIR, exist_ok=True)
 	file_path = os.path.join(_PERCEPTION_LOG_DIR, f"{stream_name}.jsonl")
-	record = {"ts_utc": _timestamp_utc(), **event}
-	line = json.dumps(record, separators=(",", ":"), sort_keys=True)
 	with _JSON_LOG_LOCK:
+		record = {"ts_utc": _timestamp_utc(), **_JSON_LOG_CONTEXT, **event}
+		line = json.dumps(record, separators=(",", ":"), sort_keys=True)
 		with open(file_path, "a", encoding="utf-8") as handle:
 			handle.write(line)
 			handle.write("\n")

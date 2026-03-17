@@ -28,7 +28,7 @@ import robot_config as cfg
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE
 import drift_engine
-from logger import info, debug, warn, error
+from logger import info, debug, warn, error, write_jsonl_event
 
 
 cfg_pose_type = tuple[float, float, float, float, float, float]
@@ -71,6 +71,34 @@ class SystemHandles:
     """Holds live interfaces to hardware."""
     robot: DobotDriver
     gripper: DHGripperPGE
+
+
+def _emit_motion_event(event_name: str, **fields) -> None:
+    payload = {
+        "event": "motion_trigger",
+        "module": "CONTROL",
+        "motion": event_name,
+    }
+    payload.update(fields)
+    write_jsonl_event("motion_trace", payload)
+
+
+def _log_motion_trigger(handles: SystemHandles, event_name: str, **fields) -> None:
+    pose = handles.robot.get_tcp_pose()
+    payload = dict(fields)
+    if pose is None:
+        payload["tcp_pose_available"] = False
+    else:
+        payload["tcp_pose_available"] = True
+        payload["tcp_pose_mm_deg"] = {
+            "x": round(float(pose[0]), 3),
+            "y": round(float(pose[1]), 3),
+            "z": round(float(pose[2]), 3),
+            "rx": round(float(pose[3]), 3),
+            "ry": round(float(pose[4]), 3),
+            "rz": round(float(pose[5]), 3),
+        }
+    _emit_motion_event(event_name, **payload)
 
 
 # ----------------------------
@@ -324,6 +352,7 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
 
 def do_home(handles: SystemHandles) -> None:
     """Go to safe home pose."""
+    _log_motion_trigger(handles, "do_home", target_pose=cfg.SAFE_HOME_POSE)
     handles.robot.speed_factor(cfg.SPEED_PRECISION)
     handles.robot.go_home(speed_percent=cfg.SPEED_PRECISION)
 
@@ -333,12 +362,14 @@ def do_drop(handles: SystemHandles, dz_mm: float = -20.0) -> None:
     Minimal 'drop' primitive used currently.
     This is NOT the final placing routine; just a controlled linear descent.
     """
+    _log_motion_trigger(handles, "do_drop", dz_mm=float(dz_mm))
     handles.robot.speed_factor(cfg.SPEED_PRECISION)
     handles.robot.relmovl_user(0, 0, dz_mm, 0, 0, 0)
 
 
 def do_nudge_xy(handles: SystemHandles, dx_mm: float, dy_mm: float) -> None:
     """XY nudge in base/user frame."""
+    _log_motion_trigger(handles, "do_nudge_xy", dx_mm=float(dx_mm), dy_mm=float(dy_mm))
     handles.robot.speed_factor(cfg.SPEED_PRECISION)
     handles.robot.relmovl_user(dx_mm, dy_mm, 0, 0, 0, 0)
 
@@ -348,6 +379,7 @@ def do_nudge_yaw(handles: SystemHandles, dtheta_deg: float) -> None:
     Optional yaw nudge.
     Only call this if your Dobot supports RelMovLUser with rotation in your setup.
     """
+    _log_motion_trigger(handles, "do_nudge_yaw", dtheta_deg=float(dtheta_deg))
     handles.robot.speed_factor(cfg.SPEED_PRECISION)
     handles.robot.relmovl_user(0, 0, 0, 0, 0, dtheta_deg)
 
@@ -411,6 +443,16 @@ def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_lev
     pre_neutral = cfg.neutral_pose_for_slot(pre_slot)
     post_neutral = cfg.neutral_pose_for_slot(post_slot)
 
+    _log_motion_trigger(
+        handles,
+        "execute_pick_sequence",
+        target_id=pick_target_id,
+        stack_level=int(stack_level),
+        pick_pose=pick_pose,
+        hover_pose=hover_pose,
+        pre_neutral_slot=int(pre_slot),
+        post_neutral_slot=int(post_slot),
+    )
     info("STACK", f"pick target={pick_target_id} lvl={stack_level} pre_neutral={pre_slot} post_neutral={post_slot} pick_pose={pick_pose}")
     debug("STACK", f"pick hover_pose={hover_pose}")
 
@@ -460,6 +502,13 @@ def move_to_tower_hover(handles: SystemHandles, stack_level: int, target_xy: Opt
             hover_pose[4],
             hover_pose[5],
         )
+    _log_motion_trigger(
+        handles,
+        "move_to_tower_hover",
+        stack_level=int(stack_level),
+        target_xy=target_xy,
+        hover_pose=hover_pose,
+    )
     info("STACK", f"tower hover level={stack_level} hover_pose={hover_pose}")
     movj_pose_combo(handles, hover_pose)
 
@@ -478,6 +527,14 @@ def move_to_hover_xy(handles: SystemHandles, target_x: float, target_y: float, s
         nominal_hover[4],
         nominal_hover[5],
     )
+    _log_motion_trigger(
+        handles,
+        "move_to_hover_xy",
+        stack_level=int(stack_level),
+        target_x=float(target_x),
+        target_y=float(target_y),
+        hover_xy_pose=hover_xy_pose,
+    )
     info("STACK", f"tower hover xy align level={stack_level} hover_xy_pose={hover_xy_pose}")
     robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(hover_xy_pose)
@@ -487,6 +544,13 @@ def complete_place_neutral_exit(handles: SystemHandles, stack_level: int) -> Non
     """Final neutral MoveJ after placement, combo-aware."""
     slot = cfg.place_exit_neutral_slot(stack_level)
     target_neutral = cfg.neutral_pose_for_slot(slot)
+    _log_motion_trigger(
+        handles,
+        "complete_place_neutral_exit",
+        stack_level=int(stack_level),
+        neutral_slot=int(slot),
+        target_neutral=target_neutral,
+    )
     movj_pose_combo(handles, target_neutral)
 
 
@@ -522,6 +586,14 @@ def complete_place_sequence(
         place_pose[3],
         place_pose[4],
         place_pose[5],
+    )
+    _log_motion_trigger(
+        handles,
+        "complete_place_sequence",
+        stack_level=int(stack_level),
+        place_pose=place_pose,
+        retract_hover_pose=retract_hover_pose,
+        perform_neutral_exit=bool(perform_neutral_exit),
     )
 
     # Pure vertical-only drop using relative Z from configured hover/place levels

@@ -1,8 +1,15 @@
 import threading
 import time
+from datetime import datetime, timezone
+
 import cv2
 from aruco_tracker import ArucoTracker
 from logger import info, warn, write_jsonl_event
+
+
+def _timestamp_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
 
 class PerceptionEngine:
     def __init__(self, camera_matrix=None, dist_coeffs=None):
@@ -10,6 +17,7 @@ class PerceptionEngine:
         self.camera_matrix = camera_matrix
         self.dist_coeffs = dist_coeffs
         self.latest_state = {}
+        self.last_seen_by_marker = {}
         self.state_lock = threading.Lock()
         self.last_snapshot_log_t = 0.0
         
@@ -27,8 +35,10 @@ class PerceptionEngine:
             
         poses = self.tracker.compute_poses(frame_bgr, self.camera_matrix, self.dist_coeffs)
         
+        now = time.monotonic()
+        snapshot_ts_utc = _timestamp_utc()
+
         if poses:
-            now = time.monotonic()
             if (now - self.last_snapshot_log_t) >= 1.0:
                 marker_snapshot = []
                 for m_id in sorted(poses):
@@ -62,10 +72,30 @@ class PerceptionEngine:
 
         with self.state_lock:
             self.latest_state = poses
+            for marker_id, pose in poses.items():
+                self.last_seen_by_marker[int(marker_id)] = {
+                    "pose": tuple(float(v) for v in pose),
+                    "seen_mono": float(now),
+                    "seen_utc": snapshot_ts_utc,
+                }
             
     def get_latest_state(self):
         with self.state_lock:
             return dict(self.latest_state)
+
+    def get_last_seen_marker(self, marker_id):
+        with self.state_lock:
+            record = self.last_seen_by_marker.get(int(marker_id))
+            if record is None:
+                return None
+
+            age_s = max(0.0, time.monotonic() - float(record["seen_mono"]))
+            return {
+                "marker_id": int(marker_id),
+                "pose": tuple(record["pose"]),
+                "age_s": age_s,
+                "last_seen_utc": str(record["seen_utc"]),
+            }
 
     def start_worker(self, queueL, queueR):
         """

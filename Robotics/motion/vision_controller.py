@@ -108,6 +108,12 @@ def _log_block_tracking(context: str, tracking: dict[str, Any], debug_enabled: b
         "target_id": tracking.get("target_id"),
         "marker_id": tracking.get("marker_id"),
     }
+    if tracking.get("last_seen_age_s") is not None:
+        event_payload["last_seen_age_s"] = round(float(tracking["last_seen_age_s"]), 3)
+    if tracking.get("last_seen_utc") is not None:
+        event_payload["last_seen_utc"] = str(tracking["last_seen_utc"])
+    if tracking.get("freshness_window_s") is not None:
+        event_payload["freshness_window_s"] = round(float(tracking["freshness_window_s"]), 3)
 
     if not tracking.get("configured", False):
         write_jsonl_event("block_track", event_payload)

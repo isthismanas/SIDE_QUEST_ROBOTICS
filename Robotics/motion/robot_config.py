@@ -102,6 +102,7 @@ CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of
 VISION_ASSIST_ENABLED = True       # calibrated perception in shadow mode; does not control pick motion
 VISION_REFERENCE_MARKER_ID = 0     # marker used for camera-to-robot reference tracking
 VISION_SHADOW_LOGS_ENABLED = True  # logs vision-derived comparisons without changing authority
+VISION_TRACK_FRESHNESS_S = 1.5     # observational tracking accepts markers seen within this recent window
 VISION_CALIBRATION_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",

@@ -16,7 +16,7 @@ import vision_controller
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE  # NEW: RS485 Modbus gripper driver
 import robot_config as cfg
-from logger import info, warn, error
+from logger import info, warn, error, set_jsonl_context
 
 # --- Add perception module ---
 VISION_MODE_ENABLED = vision_controller.VISION_MODE_ENABLED
@@ -232,6 +232,16 @@ def log_event(event: str, **fields) -> None:
     return lb.log_event(**payload)
 
 
+def _sync_json_log_context() -> None:
+    participant = participant_name.strip() if isinstance(participant_name, str) and participant_name.strip() else None
+    set_jsonl_context(
+        participant_name=participant,
+        session_id=session_id,
+        run_id=run_id,
+        leaderboard_mode=LEADERBOARD_MODE,
+    )
+
+
 def _clear_score_commit_state(*, reset_committed: bool = True) -> None:
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
     with _score_state_lock:
@@ -325,11 +335,13 @@ def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
     tower_attempt_start_ts = None
     run_start_time = None
     participant_name = None
+    run_id = None
     current_run_seed = None
     cfg.DRIFT_RUNTIME_RUN_SEED = None
     cfg.DRIFT_RUNTIME_PARTICIPANT = ""
     _last_ready_level_printed = None
     _clear_score_commit_state()
+    _sync_json_log_context()
     return True
 
 
@@ -753,6 +765,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         _last_ready_level_printed = None
         _clear_score_commit_state()
         _reset_drift_scale_for_run("NAME")
+        _sync_json_log_context()
         _send_line_to_unity("NAME_SET")
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
         console_info("CONTROL", f"Participant set: {participant_name}. Ready to START.", essential=True)
@@ -906,6 +919,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         cfg.DRIFT_RUNTIME_PARTICIPANT = ""
         _last_ready_level_printed = None
         _clear_score_commit_state()
+        _sync_json_log_context()
         if _is_official_mode() and vr_connected:
             console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
         return
@@ -918,6 +932,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         LEADERBOARD_MODE = "DEV"
         lb_ctx.mode = LEADERBOARD_MODE
         lb.save_leaderboard_mode(lb_ctx)
+        _sync_json_log_context()
         console_emit(f"[LEADERBOARD] MODE set to DEV (event_id={OFFICIAL_EVENT_ID})", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
         return
 
@@ -925,6 +940,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         LEADERBOARD_MODE = "OFFICIAL"
         lb_ctx.mode = LEADERBOARD_MODE
         lb.save_leaderboard_mode(lb_ctx)
+        _sync_json_log_context()
         console_emit(f"[LEADERBOARD] MODE set to OFFICIAL (event_id={OFFICIAL_EVENT_ID})", tag="PROMPT", level="INFO", module=module, allow_in_quiet=True)
         return
 
@@ -1188,6 +1204,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     drift_scale_default=float(getattr(cfg, "DRIFT_SCALE_DEFAULT", cfg.DRIFT_SCALE)),
                     drift_scale_at_start=float(cfg.DRIFT_SCALE),
                 )
+                _sync_json_log_context()
 
             if event == Event.START_STACK:
                 send_ack("START")
@@ -1635,11 +1652,13 @@ def handle_command(cmd_str: str, source: str) -> None:
                     tower_attempt_start_ts = None
                     run_start_time = None
                     participant_name = None
+                    run_id = None
                     current_run_seed = None
                     cfg.DRIFT_RUNTIME_RUN_SEED = None
                     cfg.DRIFT_RUNTIME_PARTICIPANT = ""
                     _last_ready_level_printed = None
                     _clear_score_commit_state()
+                    _sync_json_log_context()
                     return
 
                 # Auto-continue stacking if enabled and targets remain
@@ -1822,6 +1841,7 @@ def command_server():
             cfg.DRIFT_RUNTIME_RUN_SEED = None
             cfg.DRIFT_RUNTIME_PARTICIPANT = ""
             _clear_score_commit_state()
+            _sync_json_log_context()
 
             # Arm once for this VR session
             try:

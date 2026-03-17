@@ -7,6 +7,8 @@ import robot_config as cfg
 import tolerance_engine
 import vision_bridge
 
+TRACK_FRESHNESS_S = float(getattr(cfg, "VISION_TRACK_FRESHNESS_S", 1.5))
+
 
 def _tracking_state() -> dict[int, tuple[float, float, float, float, float, float]]:
     engine = getattr(tolerance_engine, "perc_engine", None)
@@ -16,6 +18,19 @@ def _tracking_state() -> dict[int, tuple[float, float, float, float, float, floa
         return engine.get_latest_state()
     except Exception:
         return {}
+
+
+def _last_seen_marker(marker_id: int) -> Optional[dict[str, Any]]:
+    engine = getattr(tolerance_engine, "perc_engine", None)
+    if engine is None:
+        return None
+    try:
+        getter = getattr(engine, "get_last_seen_marker", None)
+        if getter is None:
+            return None
+        return getter(int(marker_id))
+    except Exception:
+        return None
 
 
 def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tuple[float, float, float, float, float, float], role: str) -> dict[str, Any]:
@@ -31,6 +46,42 @@ def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tup
 
     tracking_state = _tracking_state()
     marker_pose = tracking_state.get(int(marker_id))
+    age_s = 0.0
+    last_seen_utc = None
+    if marker_pose is None:
+        last_seen = _last_seen_marker(int(marker_id))
+        if last_seen is None:
+            return {
+                "configured": True,
+                "available": False,
+                "reason": "marker_never_seen",
+                "role": role,
+                "target_id": target_id,
+                "marker_id": int(marker_id),
+            }
+
+        age_s = float(last_seen["age_s"])
+        if age_s > TRACK_FRESHNESS_S:
+            return {
+                "configured": True,
+                "available": False,
+                "reason": "marker_stale",
+                "role": role,
+                "target_id": target_id,
+                "marker_id": int(marker_id),
+                "last_seen_age_s": age_s,
+                "last_seen_utc": last_seen["last_seen_utc"],
+                "freshness_window_s": TRACK_FRESHNESS_S,
+            }
+
+        marker_pose = tuple(last_seen["pose"])
+        age_s = float(last_seen["age_s"])
+        last_seen_utc = str(last_seen["last_seen_utc"])
+    else:
+        last_seen = _last_seen_marker(int(marker_id))
+        age_s = float(last_seen["age_s"]) if last_seen is not None else 0.0
+        last_seen_utc = str(last_seen["last_seen_utc"]) if last_seen is not None else None
+
     if marker_pose is None:
         return {
             "configured": True,
@@ -62,6 +113,9 @@ def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tup
         "target_id": target_id,
         "marker_id": int(marker_id),
         "camera_pose": marker_pose,
+        "last_seen_age_s": age_s,
+        "last_seen_utc": last_seen_utc,
+        "freshness_window_s": TRACK_FRESHNESS_S,
         "robot_xy": robot_xy,
         "expected_xy": (expected_pose[0], expected_pose[1]),
         "axis_error_mm": (err_x, err_y),
