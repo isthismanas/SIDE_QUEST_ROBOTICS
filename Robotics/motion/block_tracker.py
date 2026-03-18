@@ -138,7 +138,10 @@ def _track_target(target_id: str, marker_map: dict[str, int], expected_pose: tup
             "marker_id": int(marker_id),
         }
 
-    robot_xy, reason = vision_bridge.camera_xy_to_robot_xy_mm(marker_pose[0], marker_pose[1])
+    if role == "pick":
+        robot_xy, reason = vision_bridge.camera_xy_to_pick_robot_xy_mm(marker_pose[0], marker_pose[1])
+    else:
+        robot_xy, reason = vision_bridge.camera_xy_to_robot_xy_mm(marker_pose[0], marker_pose[1])
     if robot_xy is None:
         return {
             "configured": True,

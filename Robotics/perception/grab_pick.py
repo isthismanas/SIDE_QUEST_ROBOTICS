@@ -206,7 +206,7 @@ def _plan_pick_from_marker(
     median_pose = summary["median_pose"]
     camera_x_m = float(median_pose["x_m"])
     camera_y_m = float(median_pose["y_m"])
-    robot_xy, reason = vision_bridge.camera_xy_to_robot_xy_mm(camera_x_m, camera_y_m)
+    robot_xy, reason = vision_bridge.camera_xy_to_pick_robot_xy_mm(camera_x_m, camera_y_m)
     if robot_xy is None:
         raise RuntimeError(f"camera_xy_to_robot_xy_mm failed: {reason}")
 
@@ -356,7 +356,7 @@ def main() -> int:
             )
         except Exception as exc:
             median_pose = summary["median_pose"]
-            robot_xy, robot_xy_reason = vision_bridge.camera_xy_to_robot_xy_mm(
+            robot_xy, robot_xy_reason = vision_bridge.camera_xy_to_pick_robot_xy_mm(
                 float(median_pose["x_m"]),
                 float(median_pose["y_m"]),
             )

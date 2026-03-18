@@ -94,3 +94,17 @@ def camera_xy_to_robot_xy_mm(cam_x_m: float, cam_y_m: float) -> tuple[Optional[t
         return None, reason
     robot_xy = calibration.transform_xy_mm(cam_x_m * 1000.0, cam_y_m * 1000.0)
     return robot_xy, "ok"
+
+
+def apply_pick_xy_offsets_mm(robot_x_mm: float, robot_y_mm: float) -> tuple[float, float]:
+    return (
+        float(robot_x_mm) + float(getattr(cfg, "VISION_PICK_X_OFFSET_MM", 0.0)),
+        float(robot_y_mm) + float(getattr(cfg, "VISION_PICK_Y_OFFSET_MM", 0.0)),
+    )
+
+
+def camera_xy_to_pick_robot_xy_mm(cam_x_m: float, cam_y_m: float) -> tuple[Optional[tuple[float, float]], str]:
+    robot_xy, reason = camera_xy_to_robot_xy_mm(cam_x_m, cam_y_m)
+    if robot_xy is None:
+        return None, reason
+    return apply_pick_xy_offsets_mm(robot_xy[0], robot_xy[1]), "ok"

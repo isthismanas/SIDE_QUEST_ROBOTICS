@@ -270,7 +270,7 @@ def _plan_cycle(
 ) -> dict[str, object]:
     template_pose = cfg.pick_target_pose(target_id)
     median_pose = summary["median_pose"]
-    robot_xy, reason = vision_bridge.camera_xy_to_robot_xy_mm(
+    robot_xy, reason = vision_bridge.camera_xy_to_pick_robot_xy_mm(
         float(median_pose["x_m"]),
         float(median_pose["y_m"]),
     )
