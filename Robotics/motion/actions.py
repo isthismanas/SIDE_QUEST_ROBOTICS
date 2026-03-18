@@ -109,6 +109,49 @@ def _emit_motion_event(event_name: str, **fields) -> None:
     write_jsonl_event("motion_trace", payload)
 
 
+def _pose_dict(pose: Optional[cfg_pose_type]) -> Optional[dict[str, float]]:
+    if pose is None:
+        return None
+    return {
+        "x": round(float(pose[0]), 3),
+        "y": round(float(pose[1]), 3),
+        "z": round(float(pose[2]), 3),
+        "rx": round(float(pose[3]), 3),
+        "ry": round(float(pose[4]), 3),
+        "rz": round(float(pose[5]), 3),
+    }
+
+
+def _log_motion_step(
+    handles: SystemHandles,
+    motion_name: str,
+    step_name: str,
+    phase: str,
+    commanded_pose: Optional[cfg_pose_type] = None,
+    commanded_delta_mm_deg: Optional[tuple[float, float, float, float, float, float]] = None,
+    **fields,
+) -> None:
+    pose = handles.robot.get_tcp_pose()
+    payload = {
+        "event": "motion_step",
+        "module": "CONTROL",
+        "motion": motion_name,
+        "step": step_name,
+        "phase": phase,
+    }
+    payload.update(fields)
+    if commanded_pose is not None:
+        payload["commanded_pose_mm_deg"] = _pose_dict(commanded_pose)
+    if commanded_delta_mm_deg is not None:
+        payload["commanded_delta_mm_deg"] = _pose_dict(commanded_delta_mm_deg)
+    if pose is None:
+        payload["tcp_pose_available"] = False
+    else:
+        payload["tcp_pose_available"] = True
+        payload["tcp_pose_mm_deg"] = _pose_dict(pose)
+    write_jsonl_event("motion_trace", payload)
+
+
 def _log_motion_trigger(handles: SystemHandles, event_name: str, **fields) -> None:
     pose = handles.robot.get_tcp_pose()
     payload = dict(fields)
@@ -116,14 +159,7 @@ def _log_motion_trigger(handles: SystemHandles, event_name: str, **fields) -> No
         payload["tcp_pose_available"] = False
     else:
         payload["tcp_pose_available"] = True
-        payload["tcp_pose_mm_deg"] = {
-            "x": round(float(pose[0]), 3),
-            "y": round(float(pose[1]), 3),
-            "z": round(float(pose[2]), 3),
-            "rx": round(float(pose[3]), 3),
-            "ry": round(float(pose[4]), 3),
-            "rz": round(float(pose[5]), 3),
-        }
+        payload["tcp_pose_mm_deg"] = _pose_dict(pose)
     _emit_motion_event(event_name, **payload)
 
 
@@ -156,10 +192,26 @@ def initialize_stack_session(handles: SystemHandles) -> None:
     Called after arming + gripper connect on each VR session start.
     """
     # Move to safe home using joint motion
+    _log_motion_step(
+        handles,
+        "initialize_stack_session",
+        "safe_home",
+        "start",
+        commanded_pose=cfg.SAFE_HOME_POSE,
+    )
     handles.robot.movj_pose(cfg.SAFE_HOME_POSE)
+    _log_motion_step(
+        handles,
+        "initialize_stack_session",
+        "safe_home",
+        "complete",
+        commanded_pose=cfg.SAFE_HOME_POSE,
+    )
     
     # Open gripper
+    _log_motion_step(handles, "initialize_stack_session", "gripper_open", "start")
     handles.gripper.open()
+    _log_motion_step(handles, "initialize_stack_session", "gripper_open", "complete")
 
 
 # ----------------------------
@@ -403,8 +455,10 @@ def ensure_gripper_open_at_run_start(handles: SystemHandles) -> None:
 def do_home(handles: SystemHandles) -> None:
     """Go to safe home pose."""
     _log_motion_trigger(handles, "do_home", target_pose=cfg.SAFE_HOME_POSE)
+    _log_motion_step(handles, "do_home", "safe_home", "start", commanded_pose=cfg.SAFE_HOME_POSE)
     handles.robot.speed_factor(cfg.SPEED_PRECISION)
     handles.robot.go_home(speed_percent=cfg.SPEED_PRECISION)
+    _log_motion_step(handles, "do_home", "safe_home", "complete", commanded_pose=cfg.SAFE_HOME_POSE)
 
 
 def do_drop(handles: SystemHandles, dz_mm: float = -20.0) -> None:
@@ -496,31 +550,123 @@ def _execute_pick_with_pose(
     debug("STACK", f"pick hover_pose={hover_pose}")
 
     # Route through neutral gateway before entering pickup zone
+    _log_motion_step(
+        handles,
+        motion_name,
+        "pre_neutral",
+        "start",
+        commanded_pose=pre_neutral,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
     movj_pose_combo(handles, pre_neutral)
     robot.wait_until_idle()
+    _log_motion_step(
+        handles,
+        motion_name,
+        "pre_neutral",
+        "complete",
+        commanded_pose=pre_neutral,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
 
     # Joint transition into region
+    _log_motion_step(
+        handles,
+        motion_name,
+        "pick_hover_entry",
+        "start",
+        commanded_pose=hover_pose,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
     movj_pose_combo(handles, hover_pose)
     # Wait for joint motion to complete before linear descent
     robot.wait_until_idle()
+    _log_motion_step(
+        handles,
+        motion_name,
+        "pick_hover_entry",
+        "complete",
+        commanded_pose=hover_pose,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
 
     # Linear vertical descent
+    _log_motion_step(
+        handles,
+        motion_name,
+        "pick_descent",
+        "start",
+        commanded_pose=pick_pose,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
     robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(pick_pose)
     # Ensure linear descent completed before actuating gripper
     robot.wait_until_idle()
+    _log_motion_step(
+        handles,
+        motion_name,
+        "pick_descent",
+        "complete",
+        commanded_pose=pick_pose,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
 
+    _log_motion_step(handles, motion_name, "gripper_close", "start", target_id=target_label, stack_level=int(stack_level))
     gripper.close()
     time.sleep(0.5)
+    _log_motion_step(handles, motion_name, "gripper_close", "complete", target_id=target_label, stack_level=int(stack_level))
 
     # Linear vertical retract
+    _log_motion_step(
+        handles,
+        motion_name,
+        "pick_retract",
+        "start",
+        commanded_pose=hover_pose,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
     robot.speed_factor(cfg.SPEED_PRECISION)
     robot.movl_pose(hover_pose)
     # Wait for retract to finish before joint exit
     robot.wait_until_idle()
+    _log_motion_step(
+        handles,
+        motion_name,
+        "pick_retract",
+        "complete",
+        commanded_pose=hover_pose,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
 
     # Joint exit to neutral gateway for this block
+    _log_motion_step(
+        handles,
+        motion_name,
+        "post_neutral",
+        "start",
+        commanded_pose=post_neutral,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
     movj_pose_combo(handles, post_neutral)
+    _log_motion_step(
+        handles,
+        motion_name,
+        "post_neutral",
+        "complete",
+        commanded_pose=post_neutral,
+        target_id=target_label,
+        stack_level=int(stack_level),
+    )
 
 
 def execute_pick_pose(handles: SystemHandles, pick_pose: cfg_pose_type, stack_level: int, target_label: str = "explicit_pick") -> None:
@@ -599,7 +745,25 @@ def move_to_tower_hover(
         hover_pose=hover_pose,
     )
     info("STACK", f"tower hover level={stack_level} hover_pose={hover_pose}")
+    _log_motion_step(
+        handles,
+        "move_to_tower_hover",
+        "tower_hover_entry",
+        "start",
+        commanded_pose=hover_pose,
+        stack_level=int(stack_level),
+        target_id=target_id,
+    )
     movj_pose_combo(handles, hover_pose)
+    _log_motion_step(
+        handles,
+        "move_to_tower_hover",
+        "tower_hover_entry",
+        "complete",
+        commanded_pose=hover_pose,
+        stack_level=int(stack_level),
+        target_id=target_id,
+    )
 
 
 def move_to_hover_xy(handles: SystemHandles, target_x: float, target_y: float, stack_level: int) -> None:
@@ -641,7 +805,27 @@ def complete_place_neutral_exit(handles: SystemHandles, stack_level: int, target
         neutral_slot=int(slot),
         target_neutral=target_neutral,
     )
+    _log_motion_step(
+        handles,
+        "complete_place_neutral_exit",
+        "neutral_exit",
+        "start",
+        commanded_pose=target_neutral,
+        stack_level=int(stack_level),
+        target_id=target_id,
+        neutral_slot=int(slot),
+    )
     movj_pose_combo(handles, target_neutral)
+    _log_motion_step(
+        handles,
+        "complete_place_neutral_exit",
+        "neutral_exit",
+        "complete",
+        commanded_pose=target_neutral,
+        stack_level=int(stack_level),
+        target_id=target_id,
+        neutral_slot=int(slot),
+    )
 
 
 def complete_place_sequence(
@@ -692,19 +876,49 @@ def complete_place_sequence(
     hover_z = cfg.tower_hover_pose(stack_level)[2]
     place_z = cfg.tower_place_pose(stack_level)[2]
     drop_mm = max(0.0, hover_z - place_z)
+    _log_motion_step(
+        handles,
+        "complete_place_sequence",
+        "place_drop",
+        "start",
+        commanded_pose=place_pose,
+        commanded_delta_mm_deg=(0.0, 0.0, -drop_mm, 0.0, 0.0, 0.0),
+        stack_level=int(stack_level),
+        target_id=target_id,
+    )
     robot.speed_factor(cfg.SPEED_PRECISION)
     info("CONTROL", f"[DROP] lvl={stack_level} drop_mm={drop_mm:.2f} using=relmovl_user dz=-{drop_mm:.2f}")
     robot.relmovl_user(0, 0, -drop_mm, 0, 0, 0)
 
+    _log_motion_step(handles, "complete_place_sequence", "gripper_open", "start", stack_level=int(stack_level), target_id=target_id)
     gripper.open()
     time.sleep(0.3)
+    _log_motion_step(handles, "complete_place_sequence", "gripper_open", "complete", stack_level=int(stack_level), target_id=target_id)
 
     # Linear vertical retract
+    _log_motion_step(
+        handles,
+        "complete_place_sequence",
+        "place_retract",
+        "start",
+        commanded_pose=retract_hover_pose,
+        stack_level=int(stack_level),
+        target_id=target_id,
+    )
     robot.speed_factor(cfg.SPEED_PRECISION)
     info("CONTROL", f"[RETRACT] lvl={stack_level} retract_pose=({retract_hover_pose[0]:.2f},{retract_hover_pose[1]:.2f},{retract_hover_pose[2]:.2f})")
     robot.movl_pose(retract_hover_pose)
     # Ensure retract finished before joint exit
     robot.wait_until_idle()
+    _log_motion_step(
+        handles,
+        "complete_place_sequence",
+        "place_retract",
+        "complete",
+        commanded_pose=retract_hover_pose,
+        stack_level=int(stack_level),
+        target_id=target_id,
+    )
 
     # Explicit mode: after T6/T7 retract hover, perform Y+ shuffle before neutral exit.
     # Legacy mode keeps existing high-stack sidestep behavior.
@@ -717,10 +931,30 @@ def complete_place_sequence(
             retract_hover_pose[4],
             retract_hover_pose[5],
         )
+        _log_motion_step(
+            handles,
+            "complete_place_sequence",
+            "post_place_y_shuffle",
+            "start",
+            commanded_pose=shuffle_pose,
+            stack_level=int(stack_level),
+            target_id=target_id,
+            shuffle_mm=float(cfg.post_place_y_shuffle_mm(stack_level)),
+        )
         robot.speed_factor(cfg.SPEED_PRECISION)
         info("CONTROL", f"[ESCAPE] lvl={stack_level} explicit_y_shuffle_mm={cfg.post_place_y_shuffle_mm(stack_level):.2f} pose=({shuffle_pose[0]:.2f},{shuffle_pose[1]:.2f},{shuffle_pose[2]:.2f})")
         robot.movl_pose(shuffle_pose)
         robot.wait_until_idle()
+        _log_motion_step(
+            handles,
+            "complete_place_sequence",
+            "post_place_y_shuffle",
+            "complete",
+            commanded_pose=shuffle_pose,
+            stack_level=int(stack_level),
+            target_id=target_id,
+            shuffle_mm=float(cfg.post_place_y_shuffle_mm(stack_level)),
+        )
     elif stack_level >= 5:
         sidestep_pose = (
             retract_hover_pose[0],
@@ -730,9 +964,27 @@ def complete_place_sequence(
             retract_hover_pose[4],
             retract_hover_pose[5],
         )
+        _log_motion_step(
+            handles,
+            "complete_place_sequence",
+            "legacy_sidestep",
+            "start",
+            commanded_pose=sidestep_pose,
+            stack_level=int(stack_level),
+            target_id=target_id,
+        )
         robot.speed_factor(cfg.SPEED_PRECISION)
         robot.movl_pose(sidestep_pose)
         robot.wait_until_idle()
+        _log_motion_step(
+            handles,
+            "complete_place_sequence",
+            "legacy_sidestep",
+            "complete",
+            commanded_pose=sidestep_pose,
+            stack_level=int(stack_level),
+            target_id=target_id,
+        )
 
     if perform_neutral_exit:
         complete_place_neutral_exit(handles, stack_level, target_id=target_id)

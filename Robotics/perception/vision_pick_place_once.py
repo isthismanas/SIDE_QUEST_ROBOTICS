@@ -160,6 +160,50 @@ def _write_cycle_event(event_name: str, **fields) -> None:
     write_jsonl_event("grab_pick", payload)
 
 
+def _pose_dict(pose: tuple[float, float, float, float, float, float]) -> dict[str, float]:
+    return {
+        "x": round(float(pose[0]), 3),
+        "y": round(float(pose[1]), 3),
+        "z": round(float(pose[2]), 3),
+        "rx": round(float(pose[3]), 3),
+        "ry": round(float(pose[4]), 3),
+        "rz": round(float(pose[5]), 3),
+    }
+
+
+def _pickup_grid_diagnostics(robot_x: float, robot_y: float, target_id: str) -> dict[str, object]:
+    source_pose = cfg.pick_target_pose(target_id)
+    dx = float(robot_x - source_pose[0])
+    dy = float(robot_y - source_pose[1])
+    nearest_target_id = None
+    nearest_pose = None
+    nearest_norm = None
+    for candidate_id, candidate_pose in getattr(cfg, "PICKUP_POINTS", {}).items():
+        cdx = float(robot_x - candidate_pose[0])
+        cdy = float(robot_y - candidate_pose[1])
+        cnorm = (cdx * cdx + cdy * cdy) ** 0.5
+        if nearest_norm is None or cnorm < nearest_norm:
+            nearest_target_id = str(candidate_id)
+            nearest_pose = candidate_pose
+            nearest_norm = cnorm
+    return {
+        "source_target_id": str(target_id),
+        "source_template_pose_mm_deg": _pose_dict(source_pose),
+        "source_delta_mm": {
+            "dx": round(dx, 3),
+            "dy": round(dy, 3),
+            "norm": round((dx * dx + dy * dy) ** 0.5, 3),
+        },
+        "nearest_pick_target_id": nearest_target_id,
+        "nearest_pick_pose_mm_deg": _pose_dict(nearest_pose) if nearest_pose is not None else None,
+        "nearest_pick_delta_mm": {
+            "dx": round(float(robot_x - nearest_pose[0]), 3) if nearest_pose is not None else None,
+            "dy": round(float(robot_y - nearest_pose[1]), 3) if nearest_pose is not None else None,
+            "norm": round(float(nearest_norm), 3) if nearest_norm is not None else None,
+        },
+    }
+
+
 def _select_stable_target(
     session: CaptureSession,
     target_ids: list[str],
@@ -262,6 +306,7 @@ def _plan_cycle(
         float(template_pose[4]),
         float(template_pose[5]),
     )
+    pickup_grid = _pickup_grid_diagnostics(robot_x, robot_y, target_id)
     tower_target_id = cfg.build_target_id_for_level(place_level)
     tower_place_pose = cfg.tower_place_pose(place_level)
     tower_hover_pose = cfg.tower_hover_pose(place_level)
@@ -276,6 +321,7 @@ def _plan_cycle(
         "planned_tower_hover_pose": tower_hover_pose,
         "camera_pose_summary": summary,
         "computed_robot_xy_mm": (robot_x, robot_y),
+        "pickup_grid_diagnostics": pickup_grid,
         "workspace_x_mm": workspace_x_mm,
         "workspace_y_mm": workspace_y_mm,
     }
@@ -401,6 +447,15 @@ def main() -> int:
             f"pick_xy=({plan['planned_pick_pose'][0]:.3f},{plan['planned_pick_pose'][1]:.3f}) "
             f"tower_target={plan['tower_target_id']} place_xy=({plan['planned_place_pose'][0]:.3f},{plan['planned_place_pose'][1]:.3f})"
         )
+        grid = plan["pickup_grid_diagnostics"]
+        print(
+            "[VISION_PICK_PLACE] pickup_grid "
+            f"source_template={grid['source_target_id']} "
+            f"delta_mm=({grid['source_delta_mm']['dx']:.3f},{grid['source_delta_mm']['dy']:.3f}) "
+            f"norm={grid['source_delta_mm']['norm']:.3f} "
+            f"nearest={grid['nearest_pick_target_id']} "
+            f"nearest_norm={grid['nearest_pick_delta_mm']['norm']:.3f}"
+        )
         _write_cycle_event(
             "vision_pick_place_plan",
             target_id=plan["target_id"],
@@ -414,6 +469,7 @@ def main() -> int:
             workspace_x_mm=list(workspace_x_mm),
             workspace_y_mm=list(workspace_y_mm),
             camera_pose_summary=summary,
+            pickup_grid_diagnostics=plan["pickup_grid_diagnostics"],
         )
 
         if not args.execute:
