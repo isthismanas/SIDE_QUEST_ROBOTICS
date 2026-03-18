@@ -181,6 +181,7 @@ def _wait_for_stable_summary(
     min_samples: int,
     max_xy_std_mm: float,
     timeout_s: float,
+    max_detection_age_s: float,
 ) -> dict[str, object]:
     deadline = time.time() + float(timeout_s)
     last_status_print = 0.0
@@ -189,23 +190,32 @@ def _wait_for_stable_summary(
         summary = session.capture_summary(marker_id=marker_id, min_samples=min_samples)
         std_x_mm = None
         std_y_mm = None
+        last_detection_age_s = None
+        status = session.status()
+        marker_status = status["markers"].get(marker_id, {})
+        raw_last_detection_age_s = marker_status.get("last_detection_age_s")
+        if raw_last_detection_age_s is not None:
+            last_detection_age_s = float(raw_last_detection_age_s)
         if summary is not None:
             std_pose = summary["std_pose"]
             std_x_mm = float(std_pose["x_m"]) * 1000.0
             std_y_mm = float(std_pose["y_m"]) * 1000.0
-            if std_x_mm <= max_xy_std_mm and std_y_mm <= max_xy_std_mm:
+            if (
+                std_x_mm <= max_xy_std_mm
+                and std_y_mm <= max_xy_std_mm
+                and last_detection_age_s is not None
+                and last_detection_age_s <= max_detection_age_s
+            ):
                 return summary
 
         now = time.time()
         if (now - last_status_print) >= 1.0:
-            status = session.status()
-            marker_status = status["markers"].get(marker_id, {})
             print(
                 "[PICK_CAL] "
                 f"waiting marker={marker_id} frames={status['frames']} "
                 f"buffer={marker_status.get('buffer_count')} "
                 f"ratio={float(marker_status.get('detection_ratio', 0.0)):.3f} "
-                f"last_detection_age_s={marker_status.get('last_detection_age_s')} "
+                f"last_detection_age_s={last_detection_age_s} "
                 f"std_xy_mm=({std_x_mm if std_x_mm is not None else 'n/a'}, "
                 f"{std_y_mm if std_y_mm is not None else 'n/a'})"
             )
@@ -215,7 +225,8 @@ def _wait_for_stable_summary(
 
     raise RuntimeError(
         f"Timed out waiting for stable marker {marker_id} detection window "
-        f"(min_samples={min_samples}, max_xy_std_mm={max_xy_std_mm})."
+        f"(min_samples={min_samples}, max_xy_std_mm={max_xy_std_mm}, "
+        f"max_detection_age_s={max_detection_age_s})."
     )
 
 
@@ -258,6 +269,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum wait time for a stable marker window during capture.",
     )
     parser.add_argument(
+        "--max-detection-age-s",
+        type=float,
+        default=1.0,
+        help="Marker summary must include a detection this recent before it can be latched/captured.",
+    )
+    parser.add_argument(
         "--participant-name",
         default="pick_plane_calibration",
         help="Run label stored in the capture records.",
@@ -282,6 +299,20 @@ def _print_robot_pose(robot: DobotDriver) -> None:
     )
 
 
+def _capture_live_robot_pose(robot: DobotDriver) -> Optional[dict[str, float]]:
+    tcp_pose = robot.get_tcp_pose()
+    if tcp_pose is None:
+        return None
+    return _robot_pose_payload(tcp_pose)
+
+
+def _format_robot_pose(robot_pose: dict[str, float]) -> str:
+    return (
+        f"({robot_pose['x_mm']:.3f}, {robot_pose['y_mm']:.3f}, {robot_pose['z_mm']:.3f}, "
+        f"{robot_pose['rx_deg']:.3f}, {robot_pose['ry_deg']:.3f}, {robot_pose['rz_deg']:.3f})"
+    )
+
+
 def _interactive_loop(
     session: CaptureSession,
     robot: DobotDriver,
@@ -293,11 +324,14 @@ def _interactive_loop(
     min_samples: int,
     max_xy_std_mm: float,
     timeout_s: float,
+    max_detection_age_s: float,
 ) -> int:
     records = _load_existing_records(output_path)
     sample_index = _next_sample_index(records)
-    print("[PICK_CAL] Commands: status | pose | summary | capture | quit")
-    print("[PICK_CAL] Align the TCP over the intended grasp point before capture.")
+    latched_robot_pose: Optional[dict[str, float]] = None
+    latched_marker_summary: Optional[dict[str, object]] = None
+    print("[PICK_CAL] Commands: status | pose | latch_pose | latch_marker | clear_pose | clear_marker | summary | capture | quit")
+    print("[PICK_CAL] If the arm occludes the marker, latch either side first, then capture once both are saved.")
     if records:
         summary = _dataset_summary(records)
         print(
@@ -337,6 +371,36 @@ def _interactive_loop(
                 _print_robot_pose(robot)
                 continue
 
+            if command in {"latch_pose", "lp"}:
+                latched_robot_pose = _capture_live_robot_pose(robot)
+                if latched_robot_pose is None:
+                    print("[PICK_CAL] Failed to read live TCP pose. Pose not latched.")
+                else:
+                    print("[PICK_CAL] latched tcp_pose_mm_deg=" + _format_robot_pose(latched_robot_pose))
+                continue
+
+            if command in {"clear_pose", "cp"}:
+                latched_robot_pose = None
+                print("[PICK_CAL] Cleared latched robot pose.")
+                continue
+
+            if command in {"latch_marker", "lm"}:
+                latched_marker_summary = _wait_for_stable_summary(
+                    session=session,
+                    marker_id=marker_id,
+                    min_samples=min_samples,
+                    max_xy_std_mm=max_xy_std_mm,
+                    timeout_s=timeout_s,
+                    max_detection_age_s=max_detection_age_s,
+                )
+                print("[PICK_CAL] latched marker summary " + _format_pose_block(latched_marker_summary))
+                continue
+
+            if command in {"clear_marker", "cm"}:
+                latched_marker_summary = None
+                print("[PICK_CAL] Cleared latched marker summary.")
+                continue
+
             if command in {"summary", "sum"}:
                 summary = _dataset_summary(records)
                 if summary is None:
@@ -346,26 +410,30 @@ def _interactive_loop(
                 continue
 
             if command in {"capture", "c", ""}:
-                summary = _wait_for_stable_summary(
-                    session=session,
-                    marker_id=marker_id,
-                    min_samples=min_samples,
-                    max_xy_std_mm=max_xy_std_mm,
-                    timeout_s=timeout_s,
-                )
-                print("[PICK_CAL] stable summary " + _format_pose_block(summary))
+                if latched_marker_summary is not None:
+                    summary = dict(latched_marker_summary)
+                    print("[PICK_CAL] using latched marker summary " + _format_pose_block(summary))
+                else:
+                    summary = _wait_for_stable_summary(
+                        session=session,
+                        marker_id=marker_id,
+                        min_samples=min_samples,
+                        max_xy_std_mm=max_xy_std_mm,
+                        timeout_s=timeout_s,
+                        max_detection_age_s=max_detection_age_s,
+                    )
+                    print("[PICK_CAL] stable summary " + _format_pose_block(summary))
 
-                tcp_pose = robot.get_tcp_pose()
-                if tcp_pose is None:
-                    print("[PICK_CAL] Failed to read live TCP pose. Capture aborted.")
-                    continue
-
-                robot_pose = _robot_pose_payload(tcp_pose)
-                print(
-                    "[PICK_CAL] live tcp_pose_mm_deg="
-                    f"({robot_pose['x_mm']:.3f}, {robot_pose['y_mm']:.3f}, {robot_pose['z_mm']:.3f}, "
-                    f"{robot_pose['rx_deg']:.3f}, {robot_pose['ry_deg']:.3f}, {robot_pose['rz_deg']:.3f})"
-                )
+                if latched_robot_pose is not None:
+                    robot_pose = dict(latched_robot_pose)
+                    print("[PICK_CAL] using latched tcp_pose_mm_deg=" + _format_robot_pose(robot_pose))
+                else:
+                    live_robot_pose = _capture_live_robot_pose(robot)
+                    if live_robot_pose is None:
+                        print("[PICK_CAL] Failed to read live TCP pose. Capture aborted.")
+                        continue
+                    robot_pose = live_robot_pose
+                    print("[PICK_CAL] live tcp_pose_mm_deg=" + _format_robot_pose(robot_pose))
 
                 sample_label = input("sample label: ").strip() or f"pick_plane_{sample_index + 1:02d}"
                 notes = input("notes (optional): ").strip()
@@ -407,7 +475,7 @@ def _interactive_loop(
                     print(f"[PICK_CAL] dataset {dataset_summary}")
                 continue
 
-            print("[PICK_CAL] Unknown command. Use: status | pose | summary | capture | quit")
+            print("[PICK_CAL] Unknown command. Use: status | pose | latch_pose | latch_marker | clear_pose | clear_marker | summary | capture | quit")
 
     return sample_index
 
@@ -466,6 +534,7 @@ def main() -> int:
             min_samples=int(args.min_samples),
             max_xy_std_mm=float(args.max_xy_std_mm),
             timeout_s=float(args.timeout_s),
+            max_detection_age_s=float(args.max_detection_age_s),
         )
     finally:
         stop_event.set()
