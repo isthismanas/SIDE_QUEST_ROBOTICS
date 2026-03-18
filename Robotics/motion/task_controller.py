@@ -142,6 +142,9 @@ LEADERBOARD_PORT = 8090
 # Kept in sync with LEADERBOARD_MODE / OFFICIAL_EVENT_ID whenever they change.
 lb_ctx = lb.LeaderboardContext(mode=LEADERBOARD_MODE, official_event_id=OFFICIAL_EVENT_ID)
 
+# Hard timeout: 
+HARD_TIMEOUT_S = 30.0 # 5ish minutes for competition
+
 
 def _track_server_socket(sock: socket.socket) -> None:
     with _SOCKETS_LOCK:
@@ -390,6 +393,108 @@ def finalize_run(end_state: str) -> None:
         last_finalized_mode = normalize_leaderboard_mode(lb_ctx.mode)
         last_finalized_session_id = session_id
         last_finalized_participant_name = participant_name
+
+
+def _check_run_timeout() -> bool:
+    """Check if run is active and has exceeded 5-minute hard limit."""
+    if run_start_time is None or run_finalized:
+        return False
+    now = time.monotonic()
+    elapsed = now - run_start_time
+    return elapsed >= HARD_TIMEOUT_S
+
+
+def _handle_run_timeout() -> None:
+    """Handler for 5-minute hard timeout (end_state='TIMEOUT')."""
+    global run_finalized, last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
+    global STATE, current_pick_index, current_stack_level, holding_block, participant_name, tower_attempt_start_ts
+    global run_start_time, block_attempt_start_ts, drop_committed_this_window, proposed_place_pose, proposed_place_stack_level
+    global current_zone, current_zone_stack_level, green_place_streak, combo_active, run_id, current_run_seed, _last_ready_level_printed
+    
+    module = "CONTROL"
+    timeout_mono = time.monotonic()
+    official_score = _resolve_official_score(timeout_mono)
+    blocks_placed = official_score
+    
+    run_time_s = lb.emit_run_summary(
+        "TIMEOUT",
+        run_start_time=run_start_time,
+        participant_name=participant_name,
+        current_stack_level=official_score,
+        end_time_mono=timeout_mono,
+    )
+    
+    if lb.finalize_run(
+        "TIMEOUT",
+        ctx=lb_ctx,
+        run_id=run_id,
+        session_id=session_id,
+        participant_name=participant_name,
+        current_stack_level=official_score,
+        run_start_time=run_start_time,
+        already_finalized=run_finalized,
+        end_time_mono=timeout_mono,
+    ):
+        run_finalized = True
+        last_finalized_run_id = run_id
+        last_finalized_mode = normalize_leaderboard_mode(lb_ctx.mode)
+        last_finalized_session_id = session_id
+        last_finalized_participant_name = participant_name
+    
+    _send_line_to_unity("RUN_FAIL TIMEOUT")
+    
+    log_event(
+        "EVENT_RUN_SUMMARY",
+        participant=participant_name,
+        blocks_placed=blocks_placed,
+        run_time_s=run_time_s,
+        source="TIMEOUT",
+    )
+    
+    try:
+        info(module, f"[TIMEOUT] enter state={STATE.name} holding_block_flag={holding_block}")
+        detected_holding = actions.execute_tumble_sequence(handles, fallback_holding=holding_block)
+        info(module, f"[TIMEOUT] completed detected_holding={detected_holding}")
+        log_event(
+            "EVENT_TIMEOUT_DUMP",
+            source="TIMEOUT",
+            state_before=STATE.name,
+            holding_block_flag=holding_block,
+            holding_detected=detected_holding,
+        )
+    except Exception as e:
+        warn(module, f"[TIMEOUT] dump sequence failed: {e}")
+        log_event("EVENT_TIMEOUT_DUMP_ERROR", source="TIMEOUT", error=str(e))
+    
+    STATE = State.IDLE
+    current_pick_index = 0
+    current_stack_level = 0
+    holding_block = False
+    participant_name = None
+    tower_attempt_start_ts = None
+    run_start_time = None
+    block_attempt_start_ts = None
+    drop_committed_this_window = False
+    proposed_place_pose = None
+    proposed_place_stack_level = None
+    current_zone = "GREEN"
+    current_zone_stack_level = None
+    green_place_streak = 0
+    if combo_active:
+        send_boost_end()
+    combo_active = False
+    handles.combo_active = combo_active
+    send_boost_state(0, False)
+    run_id = None
+    run_finalized = False
+    current_run_seed = None
+    cfg.DRIFT_RUNTIME_RUN_SEED = None
+    cfg.DRIFT_RUNTIME_PARTICIPANT = ""
+    _last_ready_level_printed = None
+    _clear_score_commit_state()
+    _sync_json_log_context()
+    if _is_official_mode() and vr_connected:
+        console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
 
 
 def _is_debug_enabled() -> bool:
@@ -1225,6 +1330,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     drift_scale_at_start=float(cfg.DRIFT_SCALE),
                 )
                 _sync_json_log_context()
+                actions.ensure_gripper_open_at_run_start(handles)
 
             if event == Event.START_STACK:
                 send_ack("START")
@@ -2237,6 +2343,11 @@ info("CONTROL", "TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
 try:
     while True:
         _promote_pending_commit_if_ready()
+        
+        # Check for 5-minute hard timeout
+        if _check_run_timeout():
+            _handle_run_timeout()
+        
         time.sleep(0.1)
 except KeyboardInterrupt:
     info("CONTROL", "[MAIN] Ctrl+C received. Initiating graceful shutdown...")
