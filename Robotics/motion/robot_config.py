@@ -108,6 +108,7 @@ VISION_MARKER_CHANGE_ROT_DELTA_RAD = 0.15  # suppress jittery relogs when orient
 VISION_MARKER_CHANGE_LOG_ROTATION = False  # rotation flips alone do not count as meaningful block movement
 VISION_PICK_OBJECT_PERMANENCE_ENABLED = True  # keep last-seen pickup marker positions until that block is picked
 VISION_PICK_OBJECT_PERMANENCE_MAX_AGE_S = 2.0  # only trust remembered pickup markers for a very short time after last sighting
+VISION_DYNAMIC_PICK_SELECTION_ENABLED = True  # when vision pick mode is authoritative, choose the next source block from live marker observations
 VISION_PICK_TEMPLATE_TARGET = "P3"  # provides fixed Z/orientation for single-shot perception picks
 VISION_PICK_WORKSPACE_X_MM = (210.0, 430.0)  # bounded XY workspace for arbitrary-on-plane perception picks
 VISION_PICK_WORKSPACE_Y_MM = (-80.0, 60.0)

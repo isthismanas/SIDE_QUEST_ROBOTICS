@@ -99,6 +99,10 @@ _WORKER_THREADS: list[threading.Thread] = []
 # --- Session-level participant + telemetry state ---
 participant_name = None
 session_id = None
+current_pick_index = 0
+current_stack_level = 0
+current_pick_source_id = None
+remaining_pick_targets = [str(target_id) for target_id in cfg.PICK_SEQUENCE]
 tower_attempt_start_ts = None
 run_start_time = None
 block_attempt_start_ts = None
@@ -246,12 +250,46 @@ def _sync_json_log_context() -> None:
 
 
 def _current_pick_target_id() -> str | None:
+    if isinstance(current_pick_source_id, str) and current_pick_source_id.strip():
+        return current_pick_source_id
     try:
         if 0 <= int(current_pick_index) < len(cfg.PICK_SEQUENCE):
             return str(cfg.PICK_SEQUENCE[int(current_pick_index)])
     except Exception:
         return None
     return None
+
+
+def _reset_pick_progress_state() -> None:
+    global current_pick_index, current_stack_level, current_pick_source_id, remaining_pick_targets
+    current_pick_index = 0
+    current_stack_level = 0
+    current_pick_source_id = None
+    remaining_pick_targets = [str(target_id) for target_id in cfg.PICK_SEQUENCE]
+
+
+def _dynamic_pick_selection_enabled() -> bool:
+    return bool(VISION_MODE_ENABLED and getattr(cfg, "VISION_DYNAMIC_PICK_SELECTION_ENABLED", False))
+
+
+def _resolve_next_pick_target_id() -> tuple[str | None, str]:
+    if not remaining_pick_targets:
+        return None, "no_remaining_targets"
+
+    if _dynamic_pick_selection_enabled():
+        selected = vision_controller.select_next_pick_target(remaining_pick_targets, debug_enabled=_is_debug_enabled())
+        if selected is None:
+            return None, "no_live_pick_candidate"
+        return str(selected), "vision_dynamic"
+
+    return str(remaining_pick_targets[0]), "sequence"
+
+
+def _consume_pick_target(target_id: str | None) -> None:
+    global current_pick_source_id, remaining_pick_targets
+    if isinstance(target_id, str):
+        remaining_pick_targets = [candidate for candidate in remaining_pick_targets if str(candidate) != target_id]
+    current_pick_source_id = None
 
 
 def _log_inferred_block_state(event_name: str, **fields) -> None:
@@ -297,7 +335,7 @@ def _resolve_official_score(as_of_mono: float | None = None) -> int:
 
 def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, run_finalized
-    global current_pick_index, current_stack_level, holding_block, proposed_place_pose, proposed_place_stack_level
+    global current_pick_index, current_stack_level, current_pick_source_id, remaining_pick_targets, holding_block, proposed_place_pose, proposed_place_stack_level
     global block_attempt_start_ts, drop_committed_this_window, tower_attempt_start_ts, run_start_time, participant_name
     global run_id, session_id
     global current_run_seed, _last_ready_level_printed, last_finalized_run_id, last_finalized_mode
@@ -347,8 +385,7 @@ def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
     time.sleep(5.0)
     console_emit("[STACK] COMPLETE summary emitted (post-wait)", tag="SUMMARY", level="INFO", module="CONTROL", allow_in_quiet=True)
 
-    current_pick_index = 0
-    current_stack_level = 0
+    _reset_pick_progress_state()
     holding_block = False
     proposed_place_pose = None
     proposed_place_stack_level = None
@@ -832,7 +869,7 @@ def handle_command(cmd_str: str, source: str) -> None:
     source: Log prefix, e.g., "CONTROL", "ADMIN"
     """
     global STATE, robot_armed, gripper_connected, controller_busy
-    global current_pick_index, current_stack_level, stacking_enabled, target_stack_count
+    global current_pick_index, current_stack_level, current_pick_source_id, remaining_pick_targets, stacking_enabled, target_stack_count
     global participant_name, session_id, tower_attempt_start_ts, run_start_time, block_attempt_start_ts, drop_committed_this_window, decision_seq, holding_block, current_session_token
     global proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active
@@ -861,8 +898,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             warn(module, "[GATE] NAME command requires free text (e.g., NAME Alice).")
             return
         participant_name = name_value
-        current_stack_level = 0
-        current_pick_index = 0
+        _reset_pick_progress_state()
         session_id = f"{int(time.time())}-{uuid4().hex[:8]}"
         tower_attempt_start_ts = None
         run_start_time = None
@@ -1019,8 +1055,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             controller_busy = False
 
         STATE = State.IDLE
-        current_pick_index = 0
-        current_stack_level = 0
+        _reset_pick_progress_state()
         holding_block = False
         participant_name = None
         tower_attempt_start_ts = None
@@ -1102,8 +1137,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             actions.do_home(handles)
             actions.do_grip_open(handles)
             STATE = State.IDLE
-            current_pick_index = 0
-            current_stack_level = 0
+            _reset_pick_progress_state()
             drop_committed_this_window = False
             proposed_place_pose = None
             proposed_place_stack_level = None
@@ -1284,10 +1318,10 @@ def handle_command(cmd_str: str, source: str) -> None:
         controller_busy = True
         try:
             # Bounds checking
-            if current_pick_index >= len(cfg.PICK_SEQUENCE):
+            if not remaining_pick_targets:
                 if event == Event.START_STACK:
                     send_nack("START", "BAD_STATE")
-                warn(module, "[STACK] No more blocks in PICK_SEQUENCE. Ignoring START.")
+                warn(module, "[STACK] No remaining pickup targets. Ignoring START.")
                 return
 
             if current_stack_level >= target_stack_count:
@@ -1337,7 +1371,13 @@ def handle_command(cmd_str: str, source: str) -> None:
 
             # Execute pick sequence
             my_token = current_session_token
-            pick_target_id = cfg.PICK_SEQUENCE[current_pick_index]
+            pick_target_id, pick_target_reason = _resolve_next_pick_target_id()
+            if pick_target_id is None:
+                if VISION_MODE_ENABLED:
+                    _handle_vision_pick_unavailable(pick_target_reason)
+                    return
+                warn(module, f"[STACK] Could not resolve next pick target: {pick_target_reason}")
+                return
             handles.combo_active = combo_active
             vision_controller.log_pick_tracking(
                 target_id=pick_target_id,
@@ -1351,6 +1391,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     _handle_vision_pick_unavailable(e.reason)
                     return
                 raise
+            current_pick_source_id = pick_target_id
             try:
                 pick_pose = cfg.pick_target_pose(pick_target_id)
                 hover_pose = cfg.pick_target_hover_pose(pick_target_id)
@@ -1361,7 +1402,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 "block_inferred_picked",
                 target_id=pick_target_id,
                 stack_level=int(current_stack_level),
-                source="deterministic_pick",
+                source="vision_pick" if VISION_MODE_ENABLED else "deterministic_pick",
                 pick_pose=pick_pose,
                 hover_pose=hover_pose,
             )
@@ -1640,7 +1681,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         try:
             send_ack("DROP")
             my_token = current_session_token
-            placed_target_id = _current_pick_target_id()
+            placed_target_id = current_pick_source_id or _current_pick_target_id()
             zone_at_commit = "UNKNOWN"
             if current_stack_level is not None and current_stack_level >= 0:
                 nominal_place_pose = cfg.tower_place_pose(current_stack_level)
@@ -1753,6 +1794,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         final_place_pose[5],
                     ),
                 )
+                _consume_pick_target(placed_target_id)
                 holding_block = False
                 proposed_place_pose = None
                 proposed_place_stack_level = None
@@ -1809,8 +1851,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     time.sleep(5.0)
                     console_emit("[STACK] COMPLETE summary emitted (post-wait)", tag="SUMMARY", level="INFO", module=module, allow_in_quiet=True)
 
-                    current_pick_index = 0
-                    current_stack_level = 0
+                    _reset_pick_progress_state()
                     holding_block = False
                     proposed_place_pose = None
                     proposed_place_stack_level = None
@@ -1829,7 +1870,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     return
 
                 # Auto-continue stacking if enabled and targets remain
-                if stacking_enabled and current_stack_level < target_stack_count and current_pick_index < len(cfg.PICK_SEQUENCE):
+                if stacking_enabled and current_stack_level < target_stack_count and remaining_pick_targets:
                     info(module, "[STACK] Auto-continue to next block.")
                     if my_token != current_session_token:
                         return
@@ -1837,7 +1878,16 @@ def handle_command(cmd_str: str, source: str) -> None:
                     if auto_result.allowed:
                         STATE = auto_result.next_state
                         my_token = current_session_token
-                        pick_target_id = cfg.PICK_SEQUENCE[current_pick_index]
+                        pick_target_id, pick_target_reason = _resolve_next_pick_target_id()
+                        if pick_target_id is None:
+                            if VISION_MODE_ENABLED:
+                                warn(module, f"[VISION] pick pose unavailable: {pick_target_reason}")
+                                _send_line_to_unity("VISION_STATUS FAIL")
+                                STATE = State.WAITING_FOR_REPOSITION
+                                info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
+                                return
+                            warn(module, f"[STACK] Could not resolve next pick target: {pick_target_reason}")
+                            return
                         handles.combo_active = combo_active
                         vision_controller.log_pick_tracking(
                             target_id=pick_target_id,
@@ -1854,6 +1904,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                                 info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
                                 return
                             raise
+                        current_pick_source_id = pick_target_id
                         try:
                             pick_pose = cfg.pick_target_pose(pick_target_id)
                             hover_pose = cfg.pick_target_hover_pose(pick_target_id)
@@ -1864,7 +1915,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                             "block_inferred_picked",
                             target_id=pick_target_id,
                             stack_level=int(current_stack_level),
-                            source="deterministic_pick",
+                            source="vision_pick" if VISION_MODE_ENABLED else "deterministic_pick",
                             pick_pose=pick_pose,
                             hover_pose=hover_pose,
                         )
@@ -1932,8 +1983,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             if ok:
                 info(module, "[RECOVERY] Recovery reported OK. Resetting state to IDLE.")
                 STATE = State.IDLE
-                current_pick_index = 0
-                current_stack_level = 0
+                _reset_pick_progress_state()
                 proposed_place_pose = None
                 proposed_place_stack_level = None
                 current_zone = "GREEN"
@@ -2006,8 +2056,7 @@ def command_server():
             STATE = State.IDLE
 
             # Initialize fresh stacking session
-            current_pick_index = 0
-            current_stack_level = 0
+            _reset_pick_progress_state()
             # Dev 8 autonomous stacking loop controls
             stacking_enabled = True
             target_stack_count = cfg.stack_target_count()

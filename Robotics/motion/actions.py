@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import robot_config as cfg
+import block_tracker
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE
 import drift_engine
@@ -50,7 +51,32 @@ class DeterministicPickPoseProvider(PickPoseProvider):
 
 class VisionPickPoseProvider(PickPoseProvider):
     def get_pick_pose(self, target_id: str) -> tuple[Optional[cfg_pose_type], str]:
-        return None, "Vision pick pose provider not implemented"
+        tracking = block_tracker.track_pick_target(target_id)
+        if not tracking.get("configured", False):
+            return None, str(tracking.get("reason", "marker_unmapped"))
+        if not tracking.get("available", False):
+            return None, str(tracking.get("reason", "marker_unavailable"))
+        observation_source = str(tracking.get("observation_source", "")).strip().lower()
+        if observation_source != "live":
+            return None, f"pick_observation_not_live:{observation_source or 'unknown'}"
+
+        try:
+            template_pose = cfg.pick_target_pose(target_id)
+        except Exception as e:
+            return None, str(e)
+
+        robot_x, robot_y = tracking["robot_xy"]
+        return (
+            (
+                float(robot_x),
+                float(robot_y),
+                float(template_pose[2]),
+                float(template_pose[3]),
+                float(template_pose[4]),
+                float(template_pose[5]),
+            ),
+            "ok",
+        )
 
 
 class PickPoseUnavailableError(RuntimeError):

@@ -101,6 +101,24 @@ def reset_pick_tracking_memory() -> None:
     block_tracker.reset_pick_tracking_memory()
 
 
+def select_next_pick_target(remaining_targets: list[str], debug_enabled: bool = False) -> str | None:
+    selection = block_tracker.select_live_pick_target([str(target_id) for target_id in remaining_targets])
+    if selection is None:
+        if debug_enabled:
+            info("CONTROL", f"[VISION_PICK_SELECT] no live candidate among remaining={remaining_targets}")
+        return None
+
+    target_id = str(selection["target_id"])
+    if debug_enabled:
+        robot_x, robot_y = selection["robot_xy"]
+        info(
+            "CONTROL",
+            f"[VISION_PICK_SELECT] target={target_id} marker={selection['marker_id']} "
+            f"robot_xy=({robot_x:.2f},{robot_y:.2f}) age_s={float(selection.get('last_seen_age_s', 0.0)):.3f}",
+        )
+    return target_id
+
+
 def _log_block_tracking(context: str, tracking: dict[str, Any], debug_enabled: bool = False) -> None:
     if not _shadow_logs_enabled():
         return

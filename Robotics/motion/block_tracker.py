@@ -176,6 +176,31 @@ def track_pick_target(target_id: str) -> dict[str, Any]:
     return _track_target(target_id=target_id, marker_map=marker_map, expected_pose=expected_pose, role="pick")
 
 
+def select_live_pick_target(target_ids: list[str]) -> Optional[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for target_id in target_ids:
+        tracking = track_pick_target(str(target_id))
+        if not tracking.get("configured", False):
+            continue
+        if not tracking.get("available", False):
+            continue
+        if str(tracking.get("observation_source", "")).strip().lower() != "live":
+            continue
+        candidates.append(tracking)
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (
+            float(item.get("last_seen_age_s", 0.0)),
+            int(item.get("marker_id", 10**9)),
+            str(item.get("target_id", "")),
+        )
+    )
+    return candidates[0]
+
+
 def track_drop_target(target_id: str) -> dict[str, Any]:
     marker_map = dict(getattr(cfg, "VISION_DROP_MARKER_MAP", {}))
     expected_pose = cfg.build_target_pose(target_id)
