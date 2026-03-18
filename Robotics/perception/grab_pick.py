@@ -268,6 +268,7 @@ def _execute_pick(plan: dict[str, object], home_after: bool) -> None:
     try:
         actions.arm_robot_once(handles)
         actions.connect_gripper_once(handles)
+        handles.gripper.ensure_initialized()
         actions.initialize_stack_session(handles)
         actions.execute_pick_pose(
             handles,
