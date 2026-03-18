@@ -63,5 +63,5 @@ Robotics/perception/calibration_data/blocks
 Robotics/perception/calibration_data/BLOCK_MARKER_PLAN.md
 Robotics/perception/calibration_data/
 !Robotics/perception/logs/
-Robotics/perception/logs/*.jsonl
+!Robotics/perception/logs/*.jsonl
 !Robotics/perception/logs/.gitkeep
