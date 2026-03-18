@@ -98,6 +98,83 @@ def _projection_summary(summary: dict[str, object], robot_pose: dict[str, float]
     }
 
 
+def _load_existing_records(output_path: str) -> list[dict[str, object]]:
+    if not os.path.exists(output_path):
+        return []
+
+    records: list[dict[str, object]] = []
+    with open(output_path, "r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in existing capture file {output_path} line {line_number}: {exc}"
+                ) from exc
+            if isinstance(payload, dict):
+                records.append(payload)
+    return records
+
+
+def _next_sample_index(records: list[dict[str, object]]) -> int:
+    next_index = 0
+    for record in records:
+        raw_index = record.get("sample_index")
+        if raw_index is None:
+            continue
+        try:
+            next_index = max(next_index, int(raw_index) + 1)
+        except (TypeError, ValueError):
+            continue
+    return next_index
+
+
+def _dataset_summary(records: list[dict[str, object]]) -> Optional[str]:
+    robot_x: list[float] = []
+    robot_y: list[float] = []
+    camera_x: list[float] = []
+    camera_y: list[float] = []
+
+    for record in records:
+        robot_pose = record.get("robot_pose")
+        if isinstance(robot_pose, dict):
+            x_mm = robot_pose.get("x_mm")
+            y_mm = robot_pose.get("y_mm")
+            if x_mm is not None and y_mm is not None:
+                robot_x.append(float(x_mm))
+                robot_y.append(float(y_mm))
+
+        camera_window = record.get("camera_window")
+        if isinstance(camera_window, dict):
+            median_pose = camera_window.get("median_pose")
+            if isinstance(median_pose, dict):
+                x_m = median_pose.get("x_m")
+                y_m = median_pose.get("y_m")
+                if x_m is not None and y_m is not None:
+                    camera_x.append(float(x_m) * 1000.0)
+                    camera_y.append(float(y_m) * 1000.0)
+
+    if not robot_x:
+        return None
+
+    parts = [
+        f"samples={len(records)}",
+        f"robot_xy_span_mm=x[{min(robot_x):.1f},{max(robot_x):.1f}]",
+        f"y[{min(robot_y):.1f},{max(robot_y):.1f}]",
+    ]
+    if camera_x and camera_y:
+        parts.extend(
+            [
+                f"camera_xy_span_mm=x[{min(camera_x):.1f},{max(camera_x):.1f}]",
+                f"y[{min(camera_y):.1f},{max(camera_y):.1f}]",
+            ]
+        )
+    return " ".join(parts)
+
+
 def _wait_for_stable_summary(
     session: CaptureSession,
     marker_id: int,
@@ -110,6 +187,8 @@ def _wait_for_stable_summary(
 
     while time.time() < deadline:
         summary = session.capture_summary(marker_id=marker_id, min_samples=min_samples)
+        std_x_mm = None
+        std_y_mm = None
         if summary is not None:
             std_pose = summary["std_pose"]
             std_x_mm = float(std_pose["x_m"]) * 1000.0
@@ -126,7 +205,9 @@ def _wait_for_stable_summary(
                 f"waiting marker={marker_id} frames={status['frames']} "
                 f"buffer={marker_status.get('buffer_count')} "
                 f"ratio={float(marker_status.get('detection_ratio', 0.0)):.3f} "
-                f"last_detection_age_s={marker_status.get('last_detection_age_s')}"
+                f"last_detection_age_s={marker_status.get('last_detection_age_s')} "
+                f"std_xy_mm=({std_x_mm if std_x_mm is not None else 'n/a'}, "
+                f"{std_y_mm if std_y_mm is not None else 'n/a'})"
             )
             last_status_print = now
 
@@ -167,13 +248,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-xy-std-mm",
         type=float,
-        default=5.0,
+        default=6.5,
         help="Maximum allowed camera-frame X/Y std in mm for a stable capture.",
     )
     parser.add_argument(
         "--timeout-s",
         type=float,
-        default=20.0,
+        default=30.0,
         help="Maximum wait time for a stable marker window during capture.",
     )
     parser.add_argument(
@@ -213,9 +294,18 @@ def _interactive_loop(
     max_xy_std_mm: float,
     timeout_s: float,
 ) -> int:
-    sample_index = 0
-    print("[PICK_CAL] Commands: status | pose | capture | quit")
+    records = _load_existing_records(output_path)
+    sample_index = _next_sample_index(records)
+    print("[PICK_CAL] Commands: status | pose | summary | capture | quit")
     print("[PICK_CAL] Align the TCP over the intended grasp point before capture.")
+    if records:
+        summary = _dataset_summary(records)
+        print(
+            f"[PICK_CAL] Resuming existing capture file with {len(records)} samples. "
+            f"next_sample_index={sample_index}"
+        )
+        if summary is not None:
+            print(f"[PICK_CAL] dataset {summary}")
 
     with open(output_path, "a", encoding="utf-8") as handle:
         while True:
@@ -245,6 +335,14 @@ def _interactive_loop(
 
             if command in {"pose", "p"}:
                 _print_robot_pose(robot)
+                continue
+
+            if command in {"summary", "sum"}:
+                summary = _dataset_summary(records)
+                if summary is None:
+                    print("[PICK_CAL] No saved samples yet.")
+                else:
+                    print(f"[PICK_CAL] dataset {summary}")
                 continue
 
             if command in {"capture", "c", ""}:
@@ -300,12 +398,16 @@ def _interactive_loop(
                 }
                 handle.write(json.dumps(record) + "\n")
                 handle.flush()
+                records.append(record)
 
                 sample_index += 1
                 print(f"[PICK_CAL] Saved sample {sample_index} to {output_path}")
+                dataset_summary = _dataset_summary(records)
+                if dataset_summary is not None:
+                    print(f"[PICK_CAL] dataset {dataset_summary}")
                 continue
 
-            print("[PICK_CAL] Unknown command. Use: status | pose | capture | quit")
+            print("[PICK_CAL] Unknown command. Use: status | pose | summary | capture | quit")
 
     return sample_index
 
