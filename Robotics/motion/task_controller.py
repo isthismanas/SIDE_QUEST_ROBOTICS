@@ -149,6 +149,10 @@ lb_ctx = lb.LeaderboardContext(mode=LEADERBOARD_MODE, official_event_id=OFFICIAL
 # Hard timeout: 
 HARD_TIMEOUT_S = 30.0 # 5ish minutes for competition
 
+# DEBUG: Temporary flag to detect competing motion commands during timeout cleanup.
+# Set True at the start of _handle_run_timeout(), False after state is fully reset.
+run_terminating = False
+
 
 def _track_server_socket(sock: socket.socket) -> None:
     with _SOCKETS_LOCK:
@@ -447,9 +451,15 @@ def _handle_run_timeout() -> None:
     global STATE, current_pick_index, current_stack_level, holding_block, participant_name, tower_attempt_start_ts
     global run_start_time, block_attempt_start_ts, drop_committed_this_window, proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active, run_id, current_run_seed, _last_ready_level_printed
-    
+    global run_terminating
+
     module = "CONTROL"
     timeout_mono = time.monotonic()
+    info(module, f"[TIMEOUT] >>> HANDLER ENTERED ts={timeout_mono:.4f} state={STATE.name} "
+                 f"holding_block={holding_block} run_finalized_before={run_finalized} "
+                 f"run_terminating_before={run_terminating}")
+    run_terminating = True
+    info(module, "[TIMEOUT] run_terminating=True (set)")
     official_score = _resolve_official_score(timeout_mono)
     blocks_placed = official_score
     
@@ -460,7 +470,8 @@ def _handle_run_timeout() -> None:
         current_stack_level=official_score,
         end_time_mono=timeout_mono,
     )
-    
+
+    run_finalized_pre = run_finalized
     if lb.finalize_run(
         "TIMEOUT",
         ctx=lb_ctx,
@@ -477,8 +488,11 @@ def _handle_run_timeout() -> None:
         last_finalized_mode = normalize_leaderboard_mode(lb_ctx.mode)
         last_finalized_session_id = session_id
         last_finalized_participant_name = participant_name
-    
+
+    info(module, f"[TIMEOUT] finalize result: run_finalized_before={run_finalized_pre} run_finalized_after={run_finalized}")
+    info(module, "[TIMEOUT] sending RUN_FAIL TIMEOUT to Unity")
     _send_line_to_unity("RUN_FAIL TIMEOUT")
+    info(module, "[TIMEOUT] RUN_FAIL TIMEOUT sent to Unity")
     
     log_event(
         "EVENT_RUN_SUMMARY",
@@ -489,9 +503,9 @@ def _handle_run_timeout() -> None:
     )
     
     try:
-        info(module, f"[TIMEOUT] enter state={STATE.name} holding_block_flag={holding_block}")
-        detected_holding = actions.execute_tumble_sequence(handles, fallback_holding=holding_block)
-        info(module, f"[TIMEOUT] completed detected_holding={detected_holding}")
+        info(module, f"[TIMEOUT] calling execute_tumble_sequence: state={STATE.name} holding_block={holding_block} run_terminating={run_terminating}")
+        detected_holding = actions.execute_tumble_sequence(handles, fallback_holding=holding_block, run_terminating=run_terminating)
+        info(module, f"[TIMEOUT] execute_tumble_sequence returned detected_holding={detected_holding}")
         log_event(
             "EVENT_TIMEOUT_DUMP",
             source="TIMEOUT",
@@ -530,6 +544,8 @@ def _handle_run_timeout() -> None:
     _last_ready_level_printed = None
     _clear_score_commit_state()
     _sync_json_log_context()
+    run_terminating = False
+    info(module, "[TIMEOUT] run_terminating=False (reset). Handler finished.")
     if _is_official_mode() and vr_connected:
         console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
 
@@ -878,6 +894,7 @@ def handle_command(cmd_str: str, source: str) -> None:
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
     global last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
     global _last_nudge_t
+    global run_terminating
 
     _promote_pending_commit_if_ready()
 
@@ -1296,6 +1313,28 @@ def handle_command(cmd_str: str, source: str) -> None:
                     robot_armed = False
             else:
                 # Normal home
+                            else:
+                                # Normal home
+                                info(module, f"[MOTION_CMD] do_home state={STATE.name} run_terminating={run_terminating}")
+                                                        if prev == State.FAULT:
+                                                            info(module, "[RECOVERY] HOME requested from FAULT. Starting recovery sequence...")
+                                                            actions.recover_from_fault(handles)
+                                                            mode_after = handles.robot.robot_mode()
+                                                            if mode_after not in (9, 11):
+                                                                info(module, f"[RECOVERY] Recovery successful during HOME. Robot mode: {mode_after}")
+                                                                robot_armed = True
+                                                            else:
+                                                                warn(module, f"[RECOVERY] Recovery incomplete during HOME. Robot still in fault mode: {mode_after}")
+                                                                robot_armed = False
+                                                        else:
+                                                            # Normal home
+                                                            info(module, f"[MOTION_CMD] do_home state={STATE.name} run_terminating={run_terminating}")
+                                                            actions.do_home(handles)
+                                            else:
+                                                # Normal home
+                                                info(module, f"[MOTION_CMD] do_home state={STATE.name} run_terminating={run_terminating}")
+                                                actions.do_home(handles)
+                                actions.do_home(handles)
                 actions.do_home(handles)
                 # Immediate RobotMode check after motion
                 m = handles.robot.robot_mode()
@@ -1506,6 +1545,15 @@ def handle_command(cmd_str: str, source: str) -> None:
                 )
 
             actions.do_nudge_xy(handles, applied_dx, applied_dy)
+                        if _is_debug_enabled() and (applied_dx != requested_dx or applied_dy != requested_dy):
+                            warn(
+                                module,
+                                f"[GATE] NUDGE_XY clamped: req=({requested_dx:.3f},{requested_dy:.3f}) "
+                                f"applied=({applied_dx:.3f},{applied_dy:.3f}) max=±{max_offset_mm:.1f}mm",
+                            )
+
+                        info(module, f"[MOTION_CMD] do_nudge_xy dx={applied_dx:.3f} dy={applied_dy:.3f} state={STATE.name} run_terminating={run_terminating}")
+                        actions.do_nudge_xy(handles, applied_dx, applied_dy)
             if proposed_place_pose is not None and proposed_place_stack_level == current_stack_level:
                 before_x = proposed_place_pose[0]
                 before_y = proposed_place_pose[1]
@@ -2390,6 +2438,92 @@ _start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)
 
 info("CONTROL", "TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
 try:
+                                                                if event == Event.HOME:
+                                                                    if controller_busy:
+                                                                        warn(module, "[GATE] Controller busy.")
+                                                                        return
+                                                                    controller_busy = True
+                                                                    try:
+                                                                        # If recovering from FAULT, call recovery routine first
+                                                                        if prev == State.FAULT:
+                                                                            info(module, "[RECOVERY] HOME requested from FAULT. Starting recovery sequence...")
+                                                                            actions.recover_from_fault(handles)
+                                                                            mode_after = handles.robot.robot_mode()
+                                                                            if mode_after not in (9, 11):
+                                                                                info(module, f"[RECOVERY] Recovery successful during HOME. Robot mode: {mode_after}")
+                                                                                robot_armed = True
+                                                                            else:
+                                                                                warn(module, f"[RECOVERY] Recovery incomplete during HOME. Robot still in fault mode: {mode_after}")
+                                                                                robot_armed = False
+                                                                        else:
+                                                                            # Normal home
+                                                                            info(module, f"[MOTION_CMD] do_home state={STATE.name} run_terminating={run_terminating}")
+                                                                            actions.do_home(handles)
+                                                                            # Immediate RobotMode check after motion
+                                                                            m = handles.robot.robot_mode()
+                                                                            if m in (9, 11):
+                                                                                console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
+                                                                                fault_result = step(STATE, Event.FAULT)
+                                                                                if fault_result.allowed:
+                                                                                    STATE = fault_result.next_state
+                                                                                    info(module, f"[SM] -> {STATE.name} (FAULT)")
+                                                                                return
+                                                                    finally:
+                                                                        controller_busy = False
+                                                            handles.combo_active = combo_active
+                                                            vision_controller.log_pick_tracking(
+                                                                target_id=pick_target_id,
+                                                                stack_level=current_stack_level,
+                                                                debug_enabled=_is_debug_enabled(),
+                                                            )
+                                                            try:
+                                                                info(module, f"[MOTION_CMD] execute_pick_sequence (auto-continue) target={pick_target_id} lvl={current_stack_level} state={STATE.name} run_terminating={run_terminating}")
+                                                                actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
+                                                            except actions.PickPoseUnavailableError as e:
+                                                                if VISION_MODE_ENABLED:
+                                                                    warn(module, f"[VISION] pick pose unavailable: {e.reason}")
+                                                                    _send_line_to_unity("VISION_STATUS FAIL")
+                                                                    STATE = State.WAITING_FOR_REPOSITION
+                                                                    info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
+                                                                    return
+                                    _last_nudge_t = now
+                                    controller_busy = True
+                                    try:
+                                        info(module, f"[MOTION_CMD] do_nudge_yaw dtheta={payload['dtheta']} state={STATE.name} run_terminating={run_terminating}")
+                                        actions.do_nudge_yaw(handles, payload["dtheta"])
+                            try:
+                                handles.combo_active = combo_active
+                                info(module, f"[MOTION_CMD] complete_place_sequence lvl={current_stack_level} state={STATE.name} run_terminating={run_terminating}")
+                                if proposed_place_pose is not None and proposed_place_stack_level == current_stack_level:
+                                    actions.complete_place_sequence(
+                                        handles,
+                                        current_stack_level,
+                                        place_pose=proposed_place_pose,
+                                        perform_neutral_exit=False,
+                                        target_id=placed_target_id,
+                                    )
+                                else:
+                                    actions.complete_place_sequence(
+                                        handles,
+                                        current_stack_level,
+                                        perform_neutral_exit=False,
+                                        target_id=placed_target_id,
+                                    )
+                handles.combo_active = combo_active
+                vision_controller.log_pick_tracking(
+                    target_id=pick_target_id,
+                    stack_level=current_stack_level,
+                    debug_enabled=_is_debug_enabled(),
+                )
+                try:
+                    info(module, f"[MOTION_CMD] execute_pick_sequence target={pick_target_id} lvl={current_stack_level} state={STATE.name} run_terminating={run_terminating}")
+                    actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
+                except actions.PickPoseUnavailableError as e:
+                    if VISION_MODE_ENABLED:
+                        _handle_vision_pick_unavailable(e.reason)
+                        return
+                    raise
+                current_pick_source_id = pick_target_id
     while True:
         _promote_pending_commit_if_ready()
         
