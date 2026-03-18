@@ -384,8 +384,17 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
     A) Holding -> SAFE_DUMP_POSE -> open -> NEUTRAL_3
     B) Not holding -> NEUTRAL_3
     """
+def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[bool] = None, run_terminating: bool = False) -> bool:
+    """
+    Deterministic tumble flow.
+    Returns detected holding state before executing motions.
+
+    A) Holding -> SAFE_DUMP_POSE -> open -> NEUTRAL_3
+    B) Not holding -> NEUTRAL_3
+    """
+    info("STACK", f"[TUMBLE] >>> ENTER fallback_holding={fallback_holding} run_terminating={run_terminating}")
     holding = _is_gripper_holding_block(handles, fallback_holding)
-    info("STACK", f"[TUMBLE] holding_detected={holding} fallback_holding={fallback_holding}")
+    info("STACK", f"[TUMBLE] holding_detected={holding} fallback_holding={fallback_holding} run_terminating={run_terminating}")
 
     if holding:
         dump_pose = cfg.tumble_dump_pose()
@@ -401,24 +410,32 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
         info("STACK", f"[TUMBLE] branch=A step=move_dump_hover pose={dump_hover_pose}")
         handles.robot.movj_pose(dump_hover_pose)
         handles.robot.wait_until_idle()
+        info("STACK", "[TUMBLE] branch=A wait_until_idle=done after move_dump_hover")
 
         info("STACK", f"[TUMBLE] branch=A step=movl_down_dump pose={dump_pose}")
         handles.robot.speed_factor(cfg.SPEED_PRECISION)
         handles.robot.movl_pose(dump_pose)
         handles.robot.wait_until_idle()
+        info("STACK", "[TUMBLE] branch=A wait_until_idle=done after movl_down_dump")
 
-        info("STACK", "[TUMBLE] branch=A step=open_gripper")
-        handles.gripper.open()
+        info("STACK", "[TUMBLE] branch=A step=open_gripper (calling)")
+        try:
+            handles.gripper.open()
+            info("STACK", "[TUMBLE] branch=A step=open_gripper success")
+        except Exception as _e:
+            warn("STACK", f"[TUMBLE] branch=A step=open_gripper FAILED: {_e}")
         time.sleep(0.2)
 
         info("STACK", f"[TUMBLE] branch=A step=movl_up_hover pose={dump_hover_pose}")
         handles.robot.speed_factor(cfg.SPEED_PRECISION)
         handles.robot.movl_pose(dump_hover_pose)
         handles.robot.wait_until_idle()
+        info("STACK", "[TUMBLE] branch=A wait_until_idle=done after movl_up_hover")
 
         neutral3 = cfg.neutral_pose_for_slot(3)
         info("STACK", f"[TUMBLE] branch=A step=move_neutral3 pose={neutral3}")
         handles.robot.movj_pose(neutral3)
+        info("STACK", "[TUMBLE] branch=A movj for neutral3 issued (no wait)")
     else:
         neutral3 = cfg.neutral_pose_for_slot(3)
         try:
@@ -428,7 +445,9 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
             warn("STACK", f"[TUMBLE] branch=B gripper open failed: {e}")
         info("STACK", f"[TUMBLE] branch=B step=move_neutral3 pose={neutral3}")
         handles.robot.movj_pose(neutral3)
+        info("STACK", "[TUMBLE] branch=B movj for neutral3 issued (no wait)")
 
+    info("STACK", f"[TUMBLE] <<< EXIT returning holding={holding} run_terminating={run_terminating}")
     return holding
 
 
