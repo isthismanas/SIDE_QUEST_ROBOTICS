@@ -24,6 +24,23 @@ from dh_gripper import DHGripperPGE
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Diagnose DH gripper RS485 communication.")
     parser.add_argument(
+        "--port",
+        default=str(cfg.GRIPPER_PORT),
+        help="Serial port to probe. Defaults to robot_config.GRIPPER_PORT.",
+    )
+    parser.add_argument(
+        "--baudrate",
+        type=int,
+        default=int(cfg.GRIPPER_BAUDRATE),
+        help="Baudrate to probe. Defaults to robot_config.GRIPPER_BAUDRATE.",
+    )
+    parser.add_argument(
+        "--slave-id",
+        type=int,
+        default=int(cfg.GRIPPER_SLAVE_ID),
+        help="Modbus slave id to probe. Defaults to robot_config.GRIPPER_SLAVE_ID.",
+    )
+    parser.add_argument(
         "--init",
         action="store_true",
         help="Attempt gripper ensure_initialized() after status reads.",
@@ -49,10 +66,12 @@ def _print_result(label: str, fn) -> bool:
 def main() -> int:
     args = parse_args()
 
-    port = str(cfg.GRIPPER_PORT)
+    port = str(args.port)
+    baudrate = int(args.baudrate)
+    slave_id = int(args.slave_id)
     print(f"[GRIPPER_DIAG] port={port}")
-    print(f"[GRIPPER_DIAG] baudrate={cfg.GRIPPER_BAUDRATE}")
-    print(f"[GRIPPER_DIAG] slave_id={cfg.GRIPPER_SLAVE_ID}")
+    print(f"[GRIPPER_DIAG] baudrate={baudrate}")
+    print(f"[GRIPPER_DIAG] slave_id={slave_id}")
     print(f"[GRIPPER_DIAG] port_exists={Path(port).exists()}")
     if Path(port).exists():
         try:
@@ -62,9 +81,9 @@ def main() -> int:
             print(f"[GRIPPER_DIAG] stat_error: {exc}")
 
     gripper = DHGripperPGE(
-        port=cfg.GRIPPER_PORT,
-        baudrate=cfg.GRIPPER_BAUDRATE,
-        device_id=cfg.GRIPPER_SLAVE_ID,
+        port=port,
+        baudrate=baudrate,
+        device_id=slave_id,
         timeout=1.0,
         open_pos=cfg.GRIPPER_OPEN_POS,
         close_pos=cfg.GRIPPER_CLOSE_POS,
