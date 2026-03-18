@@ -113,7 +113,7 @@ VISION_PICK_TEMPLATE_TARGET = "P3"  # provides fixed Z/orientation for single-sh
 VISION_PICK_WORKSPACE_X_MM = (210.0, 430.0)  # bounded XY workspace for arbitrary-on-plane perception picks
 VISION_PICK_WORKSPACE_Y_MM = (-80.0, 60.0)
 VISION_PICK_X_OFFSET_MM = 0.0
-VISION_PICK_Y_OFFSET_MM = -23.5
+VISION_PICK_Y_OFFSET_MM = -32.0
 VISION_CALIBRATION_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",
