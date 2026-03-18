@@ -343,11 +343,35 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
         handles.robot.movj_pose(neutral3)
     else:
         neutral3 = cfg.neutral_pose_for_slot(3)
+        try:
+            handles.gripper.open()
+            info("STACK", "[TUMBLE] branch=B step=open_gripper done")
+        except Exception as e:
+            warn("STACK", f"[TUMBLE] branch=B gripper open failed: {e}")
         info("STACK", f"[TUMBLE] branch=B step=move_neutral3 pose={neutral3}")
         handles.robot.movj_pose(neutral3)
 
     return holding
 
+
+def ensure_gripper_open_at_run_start(handles: SystemHandles) -> None:
+    """
+    Lightweight run-start safeguard: open gripper if detected as closed.
+    Called once per new participant run. Does nothing if already open or status unreadable.
+    """
+    try:
+        st = handles.gripper.status()
+        grip_state = st.get("grip_state")
+        pos = st.get("pos")
+        midpoint = (cfg.GRIPPER_OPEN_POS + cfg.GRIPPER_CLOSE_POS) / 2.0
+        is_closed = (grip_state == 2) or (isinstance(pos, (int, float)) and pos <= midpoint)
+        if is_closed:
+            info("STACK", "[RUN_START] Gripper detected closed at run start — opening")
+            handles.gripper.open()
+        elif bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("STACK", "[RUN_START] Gripper already open at run start")
+    except Exception as e:
+        warn("STACK", f"[RUN_START] Gripper run-start check failed (ignored): {e}")
 
 
 def do_home(handles: SystemHandles) -> None:

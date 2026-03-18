@@ -5,7 +5,6 @@ using System;
 using System.Collections.Generic;
 using UnityEngine.Events;
 using System.Collections;
-
 public class RobotCommandPipe : MonoBehaviour
 {
     [Header("Network Settings")]
@@ -209,6 +208,12 @@ public class RobotCommandPipe : MonoBehaviour
         }
 
         if (line.Equals("RUN_FAIL TUMBLE", StringComparison.OrdinalIgnoreCase))
+        {
+            uiStateManager?.OnRunTumble();
+            return;
+        }
+
+        if (line.Equals("RUN_FAIL TIMEOUT", StringComparison.OrdinalIgnoreCase))
         {
             uiStateManager?.OnRunTumble();
             return;
