@@ -143,7 +143,7 @@ LEADERBOARD_PORT = 8090
 lb_ctx = lb.LeaderboardContext(mode=LEADERBOARD_MODE, official_event_id=OFFICIAL_EVENT_ID)
 
 # Hard timeout: 
-HARD_TIMEOUT_S = 30.0 # 5ish minutes for competition
+HARD_TIMEOUT_S = 300.0 # 300s for competition
 
 
 def _track_server_socket(sock: socket.socket) -> None:
@@ -410,8 +410,10 @@ def _handle_run_timeout() -> None:
     global STATE, current_pick_index, current_stack_level, holding_block, participant_name, tower_attempt_start_ts
     global run_start_time, block_attempt_start_ts, drop_committed_this_window, proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active, run_id, current_run_seed, _last_ready_level_printed
+    global controller_busy, current_session_token
     
     module = "CONTROL"
+    current_session_token = uuid4()
     timeout_mono = time.monotonic()
     official_score = _resolve_official_score(timeout_mono)
     blocks_placed = official_score
@@ -451,6 +453,17 @@ def _handle_run_timeout() -> None:
         source="TIMEOUT",
     )
     
+    waited = False
+    while controller_busy:
+        if not waited:
+            info(module, "[TIMEOUT] Controller busy; waiting to execute timeout recovery...")
+            waited = True
+        time.sleep(0.05)
+
+    if waited:
+        info(module, "[TIMEOUT] Controller free; executing timeout recovery.")
+
+    controller_busy = True
     try:
         info(module, f"[TIMEOUT] enter state={STATE.name} holding_block_flag={holding_block}")
         detected_holding = actions.execute_tumble_sequence(handles, fallback_holding=holding_block)
@@ -465,6 +478,8 @@ def _handle_run_timeout() -> None:
     except Exception as e:
         warn(module, f"[TIMEOUT] dump sequence failed: {e}")
         log_event("EVENT_TIMEOUT_DUMP_ERROR", source="TIMEOUT", error=str(e))
+    finally:
+        controller_busy = False
     
     STATE = State.IDLE
     current_pick_index = 0
