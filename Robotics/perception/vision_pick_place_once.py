@@ -443,6 +443,91 @@ def _execute_cycle_with_handles(handles: actions.SystemHandles, plan: dict[str, 
     )
 
 
+def _log_cycle_plan(
+    *,
+    args: argparse.Namespace,
+    pick_ml_model_json: str,
+    cycle_index: int,
+    cycle_count: int,
+    plan: dict[str, object],
+    summary: dict[str, object],
+    workspace_x_mm: tuple[float, float],
+    workspace_y_mm: tuple[float, float],
+) -> None:
+    print(
+        "[VISION_PICK_PLACE] plan "
+        f"cycle={cycle_index + 1}/{cycle_count} "
+        f"source={plan['target_id']} marker={plan['marker_id']} "
+        f"pick_xy=({plan['planned_pick_pose'][0]:.3f},{plan['planned_pick_pose'][1]:.3f}) "
+        f"tower_target={plan['tower_target_id']} place_xy=({plan['planned_place_pose'][0]:.3f},{plan['planned_place_pose'][1]:.3f}) "
+        f"ml_reason={plan['pick_projection']['ml_reason']}"
+    )
+    if "depth_summary" in summary:
+        print(f"[VISION_PICK_PLACE] depth summary={summary['depth_summary']}")
+    grid = plan["pickup_grid_diagnostics"]
+    print(
+        "[VISION_PICK_PLACE] pickup_grid "
+        f"source_template={grid['source_target_id']} "
+        f"delta_mm=({grid['source_delta_mm']['dx']:.3f},{grid['source_delta_mm']['dy']:.3f}) "
+        f"norm={grid['source_delta_mm']['norm']:.3f} "
+        f"nearest={grid['nearest_pick_target_id']} "
+        f"nearest_norm={grid['nearest_pick_delta_mm']['norm']:.3f}"
+    )
+    _write_cycle_event(
+        "vision_pick_place_plan",
+        cycle_index=int(cycle_index),
+        cycle_count=cycle_count,
+        target_id=plan["target_id"],
+        marker_id=plan["marker_id"],
+        stack_level=int(plan["stack_level"]),
+        tower_target_id=plan["tower_target_id"],
+        planned_pick_pose=plan["planned_pick_pose"],
+        planned_pick_hover_pose=plan["planned_pick_hover_pose"],
+        planned_place_pose=plan["planned_place_pose"],
+        planned_tower_hover_pose=plan["planned_tower_hover_pose"],
+        workspace_x_mm=list(workspace_x_mm),
+        workspace_y_mm=list(workspace_y_mm),
+        camera_pose_summary=summary,
+        pickup_grid_diagnostics=plan["pickup_grid_diagnostics"],
+        pick_projection=plan["pick_projection"],
+        pick_ml_enabled=bool(args.enable_pick_ml),
+        pick_ml_model_json=pick_ml_model_json,
+    )
+    if "depth_summary" in summary:
+        _write_cycle_event(
+            "vision_pick_place_depth_summary",
+            cycle_index=int(cycle_index),
+            target_id=plan["target_id"],
+            marker_id=plan["marker_id"],
+            depth_summary=summary["depth_summary"],
+        )
+        write_jsonl_event(
+            "depth_dataset",
+            {
+                "event": "depth_pick_place_summary",
+                "module": "PERCEPTION",
+                "tool": "vision_pick_place_once",
+                "cycle_index": int(cycle_index),
+                "cycle_count": cycle_count,
+                "target_id": plan["target_id"],
+                "marker_id": int(plan["marker_id"]),
+                "stack_level": int(plan["stack_level"]),
+                "tower_target_id": plan["tower_target_id"],
+                "camera_pose_summary": summary,
+                "depth_summary": summary["depth_summary"],
+                "computed_robot_xy_mm": {
+                    "x": round(float(plan["computed_robot_xy_mm"][0]), 3),
+                    "y": round(float(plan["computed_robot_xy_mm"][1]), 3),
+                },
+                "planned_pick_pose": plan["planned_pick_pose"],
+                "planned_place_pose": plan["planned_place_pose"],
+                "workspace_x_mm": list(workspace_x_mm),
+                "workspace_y_mm": list(workspace_y_mm),
+                "use_depth_module": bool(args.use_depth_module),
+            },
+        )
+
+
 def main() -> int:
     args = parse_args()
     participant_name = str(args.participant_name).strip() or "vision_pick_place_once"
@@ -520,114 +605,51 @@ def main() -> int:
         workspace_x_mm, workspace_y_mm = _workspace_bounds(args)
 
         remaining_targets = list(target_ids)
-        plans: list[dict[str, object]] = []
         max_cycles = min(
             len(remaining_targets),
             available_levels,
             requested_max_count if requested_max_count is not None else min(len(remaining_targets), available_levels),
         )
-        for cycle_index in range(max_cycles):
-            try:
-                target_id, marker_id, summary = _select_stable_target(
-                    session=session,
-                    target_ids=remaining_targets,
-                    min_samples=int(args.min_samples),
-                    max_xy_std_mm=float(args.max_xy_std_mm),
-                    timeout_s=float(args.timeout_s),
-                    max_detection_age_s=float(args.max_detection_age_s),
-                )
-            except RuntimeError:
-                if cycle_index == 0:
-                    raise
-                print(
-                    f"[VISION_PICK_PLACE] no additional stable targets found after stacking {len(plans)} block(s); stopping."
-                )
-                break
-            plan = _plan_cycle(
-                target_id=target_id,
-                marker_id=marker_id,
-                summary=summary,
-                place_level=int(args.place_level) + cycle_index,
-                workspace_x_mm=workspace_x_mm,
-                workspace_y_mm=workspace_y_mm,
-            )
-            plans.append(plan)
-            remaining_targets = [candidate for candidate in remaining_targets if candidate != target_id]
-
-            print(
-                "[VISION_PICK_PLACE] plan "
-                f"cycle={cycle_index + 1}/{max_cycles} "
-                f"source={plan['target_id']} marker={plan['marker_id']} "
-                f"pick_xy=({plan['planned_pick_pose'][0]:.3f},{plan['planned_pick_pose'][1]:.3f}) "
-                f"tower_target={plan['tower_target_id']} place_xy=({plan['planned_place_pose'][0]:.3f},{plan['planned_place_pose'][1]:.3f}) "
-                f"ml_reason={plan['pick_projection']['ml_reason']}"
-            )
-            if "depth_summary" in summary:
-                print(f"[VISION_PICK_PLACE] depth summary={summary['depth_summary']}")
-            grid = plan["pickup_grid_diagnostics"]
-            print(
-                "[VISION_PICK_PLACE] pickup_grid "
-                f"source_template={grid['source_target_id']} "
-                f"delta_mm=({grid['source_delta_mm']['dx']:.3f},{grid['source_delta_mm']['dy']:.3f}) "
-                f"norm={grid['source_delta_mm']['norm']:.3f} "
-                f"nearest={grid['nearest_pick_target_id']} "
-                f"nearest_norm={grid['nearest_pick_delta_mm']['norm']:.3f}"
-            )
-            _write_cycle_event(
-                "vision_pick_place_plan",
-                cycle_index=int(cycle_index),
-                cycle_count=max_cycles,
-                target_id=plan["target_id"],
-                marker_id=plan["marker_id"],
-                stack_level=int(plan["stack_level"]),
-                tower_target_id=plan["tower_target_id"],
-                planned_pick_pose=plan["planned_pick_pose"],
-                planned_pick_hover_pose=plan["planned_pick_hover_pose"],
-                planned_place_pose=plan["planned_place_pose"],
-                planned_tower_hover_pose=plan["planned_tower_hover_pose"],
-                workspace_x_mm=list(workspace_x_mm),
-                workspace_y_mm=list(workspace_y_mm),
-                camera_pose_summary=summary,
-                pickup_grid_diagnostics=plan["pickup_grid_diagnostics"],
-                pick_projection=plan["pick_projection"],
-                pick_ml_enabled=bool(args.enable_pick_ml),
-                pick_ml_model_json=pick_ml_model_json,
-            )
-            if "depth_summary" in summary:
-                _write_cycle_event(
-                    "vision_pick_place_depth_summary",
-                    cycle_index=int(cycle_index),
-                    target_id=plan["target_id"],
-                    marker_id=plan["marker_id"],
-                    depth_summary=summary["depth_summary"],
-                )
-                write_jsonl_event(
-                    "depth_dataset",
-                    {
-                        "event": "depth_pick_place_summary",
-                        "module": "PERCEPTION",
-                        "tool": "vision_pick_place_once",
-                        "cycle_index": int(cycle_index),
-                        "cycle_count": max_cycles,
-                        "target_id": plan["target_id"],
-                        "marker_id": int(plan["marker_id"]),
-                        "stack_level": int(plan["stack_level"]),
-                        "tower_target_id": plan["tower_target_id"],
-                        "camera_pose_summary": summary,
-                        "depth_summary": summary["depth_summary"],
-                        "computed_robot_xy_mm": {
-                            "x": round(float(plan["computed_robot_xy_mm"][0]), 3),
-                            "y": round(float(plan["computed_robot_xy_mm"][1]), 3),
-                        },
-                        "planned_pick_pose": plan["planned_pick_pose"],
-                        "planned_place_pose": plan["planned_place_pose"],
-                        "workspace_x_mm": list(workspace_x_mm),
-                        "workspace_y_mm": list(workspace_y_mm),
-                        "use_depth_module": bool(args.use_depth_module),
-                    },
-                )
 
         if not args.execute:
+            plans: list[dict[str, object]] = []
+            for cycle_index in range(max_cycles):
+                try:
+                    target_id, marker_id, summary = _select_stable_target(
+                        session=session,
+                        target_ids=remaining_targets,
+                        min_samples=int(args.min_samples),
+                        max_xy_std_mm=float(args.max_xy_std_mm),
+                        timeout_s=float(args.timeout_s),
+                        max_detection_age_s=float(args.max_detection_age_s),
+                    )
+                except RuntimeError:
+                    if cycle_index == 0:
+                        raise
+                    print(
+                        f"[VISION_PICK_PLACE] no additional stable targets found after planning {len(plans)} block(s); stopping."
+                    )
+                    break
+                plan = _plan_cycle(
+                    target_id=target_id,
+                    marker_id=marker_id,
+                    summary=summary,
+                    place_level=int(args.place_level) + cycle_index,
+                    workspace_x_mm=workspace_x_mm,
+                    workspace_y_mm=workspace_y_mm,
+                )
+                plans.append(plan)
+                remaining_targets = [candidate for candidate in remaining_targets if candidate != target_id]
+                _log_cycle_plan(
+                    args=args,
+                    pick_ml_model_json=pick_ml_model_json,
+                    cycle_index=cycle_index,
+                    cycle_count=max_cycles,
+                    plan=plan,
+                    summary=summary,
+                    workspace_x_mm=workspace_x_mm,
+                    workspace_y_mm=workspace_y_mm,
+                )
             print("[VISION_PICK_PLACE] dry-run only. Re-run with --execute to move the robot.")
             _write_cycle_event(
                 "vision_pick_place_dry_run",
@@ -637,17 +659,52 @@ def main() -> int:
             )
             return 0
 
-        if not plans:
-            raise RuntimeError("No stable pickup targets were available to plan.")
-
         handles = _create_system_handles()
+        stacked_count = 0
+        executed_targets: list[str] = []
+        executed_tower_targets: list[str] = []
         try:
             _initialize_cycle_session(handles)
-            for cycle_index, plan in enumerate(plans):
+            for cycle_index in range(max_cycles):
+                try:
+                    target_id, marker_id, summary = _select_stable_target(
+                        session=session,
+                        target_ids=remaining_targets,
+                        min_samples=int(args.min_samples),
+                        max_xy_std_mm=float(args.max_xy_std_mm),
+                        timeout_s=float(args.timeout_s),
+                        max_detection_age_s=float(args.max_detection_age_s),
+                    )
+                except RuntimeError:
+                    if cycle_index == 0:
+                        raise
+                    print(
+                        f"[VISION_PICK_PLACE] no additional stable targets found after stacking {stacked_count} block(s); stopping."
+                    )
+                    break
+                plan = _plan_cycle(
+                    target_id=target_id,
+                    marker_id=marker_id,
+                    summary=summary,
+                    place_level=int(args.place_level) + cycle_index,
+                    workspace_x_mm=workspace_x_mm,
+                    workspace_y_mm=workspace_y_mm,
+                )
+                remaining_targets = [candidate for candidate in remaining_targets if candidate != target_id]
+                _log_cycle_plan(
+                    args=args,
+                    pick_ml_model_json=pick_ml_model_json,
+                    cycle_index=cycle_index,
+                    cycle_count=max_cycles,
+                    plan=plan,
+                    summary=summary,
+                    workspace_x_mm=workspace_x_mm,
+                    workspace_y_mm=workspace_y_mm,
+                )
                 _write_cycle_event(
                     "vision_pick_place_execute_start",
                     cycle_index=int(cycle_index),
-                    cycle_count=len(plans),
+                    cycle_count=max_cycles,
                     target_id=plan["target_id"],
                     marker_id=plan["marker_id"],
                     stack_level=int(plan["stack_level"]),
@@ -657,18 +714,27 @@ def main() -> int:
                 _write_cycle_event(
                     "vision_pick_place_execute_complete",
                     cycle_index=int(cycle_index),
-                    cycle_count=len(plans),
+                    cycle_count=max_cycles,
                     target_id=plan["target_id"],
                     marker_id=plan["marker_id"],
                     stack_level=int(plan["stack_level"]),
                     tower_target_id=plan["tower_target_id"],
                     completed_at_utc=_timestamp_utc(),
                 )
+                stacked_count += 1
+                executed_targets.append(str(plan["target_id"]))
+                executed_tower_targets.append(str(plan["tower_target_id"]))
             if bool(args.home_after):
                 actions.do_home(handles)
         finally:
             _close_system_handles(handles)
-        print(f"[VISION_PICK_PLACE] cycle complete. stacked={len(plans)}")
+        _write_cycle_event(
+            "vision_pick_place_runtime_complete",
+            stacked_count=int(stacked_count),
+            executed_targets=executed_targets,
+            executed_tower_targets=executed_tower_targets,
+        )
+        print(f"[VISION_PICK_PLACE] cycle complete. stacked={stacked_count}")
         return 0
     finally:
         stop_event.set()
