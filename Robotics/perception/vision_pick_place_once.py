@@ -57,6 +57,11 @@ def parse_args() -> argparse.Namespace:
         help="Free-form camera label for logging.",
     )
     parser.add_argument("--fps", type=float, default=20.0, help="Perception capture FPS.")
+    parser.add_argument(
+        "--use-depth-module",
+        action="store_true",
+        help="Enable the optional perception-side depth module for this workflow.",
+    )
     parser.add_argument("--buffer-size", type=int, default=60, help="Rolling detection buffer size.")
     parser.add_argument("--min-samples", type=int, default=20, help="Minimum buffered detections before planning.")
     parser.add_argument("--timeout-s", type=float, default=20.0, help="Maximum wait time for a stable detection window.")
@@ -270,9 +275,10 @@ def _plan_cycle(
 ) -> dict[str, object]:
     template_pose = cfg.pick_target_pose(target_id)
     median_pose = summary["median_pose"]
-    robot_xy, reason = vision_bridge.camera_xy_to_pick_robot_xy_mm(
+    robot_xy, reason = vision_bridge.camera_pose_to_pick_robot_xy_mm(
         float(median_pose["x_m"]),
         float(median_pose["y_m"]),
+        camera_pose=median_pose,
     )
     if robot_xy is None:
         raise RuntimeError(f"camera_xy_to_robot_xy_mm failed: {reason}")
@@ -391,13 +397,18 @@ def main() -> int:
         raise RuntimeError(f"No pickup markers mapped for remaining targets={target_ids}")
 
     device_info, resolved_device_id = _resolve_device(args.device_id)
-    session = CaptureSession(buffer_size=int(args.buffer_size), marker_ids=marker_ids)
+    session = CaptureSession(
+        buffer_size=int(args.buffer_size),
+        marker_ids=marker_ids,
+        use_depth_module=bool(args.use_depth_module),
+    )
     stop_event = threading.Event()
     capture_thread = _start_capture_thread(
         device_info=device_info,
         fps=float(args.fps),
         session=session,
         stop_event=stop_event,
+        use_depth_module=bool(args.use_depth_module),
     )
 
     def _request_stop(_signum=None, _frame=None) -> None:
@@ -413,12 +424,14 @@ def main() -> int:
 
         print(
             f"[VISION_PICK_PLACE] device_id={resolved_device_id} device_label={args.device_label} "
-            f"targets={target_ids} place_level={int(args.place_level)} execute={bool(args.execute)}"
+            f"targets={target_ids} place_level={int(args.place_level)} execute={bool(args.execute)} "
+            f"use_depth_module={bool(args.use_depth_module)}"
         )
         _write_cycle_event(
             "vision_pick_place_start",
             device_id=resolved_device_id,
             device_label=args.device_label,
+            use_depth_module=bool(args.use_depth_module),
             candidate_targets=target_ids,
             place_level=int(args.place_level),
             execute=bool(args.execute),
@@ -447,6 +460,8 @@ def main() -> int:
             f"pick_xy=({plan['planned_pick_pose'][0]:.3f},{plan['planned_pick_pose'][1]:.3f}) "
             f"tower_target={plan['tower_target_id']} place_xy=({plan['planned_place_pose'][0]:.3f},{plan['planned_place_pose'][1]:.3f})"
         )
+        if "depth_summary" in summary:
+            print(f"[VISION_PICK_PLACE] depth summary={summary['depth_summary']}")
         grid = plan["pickup_grid_diagnostics"]
         print(
             "[VISION_PICK_PLACE] pickup_grid "
@@ -471,6 +486,36 @@ def main() -> int:
             camera_pose_summary=summary,
             pickup_grid_diagnostics=plan["pickup_grid_diagnostics"],
         )
+        if "depth_summary" in summary:
+            _write_cycle_event(
+                "vision_pick_place_depth_summary",
+                target_id=plan["target_id"],
+                marker_id=plan["marker_id"],
+                depth_summary=summary["depth_summary"],
+            )
+            write_jsonl_event(
+                "depth_dataset",
+                {
+                    "event": "depth_pick_place_summary",
+                    "module": "PERCEPTION",
+                    "tool": "vision_pick_place_once",
+                    "target_id": plan["target_id"],
+                    "marker_id": int(plan["marker_id"]),
+                    "stack_level": int(plan["stack_level"]),
+                    "tower_target_id": plan["tower_target_id"],
+                    "camera_pose_summary": summary,
+                    "depth_summary": summary["depth_summary"],
+                    "computed_robot_xy_mm": {
+                        "x": round(float(plan["computed_robot_xy_mm"][0]), 3),
+                        "y": round(float(plan["computed_robot_xy_mm"][1]), 3),
+                    },
+                    "planned_pick_pose": plan["planned_pick_pose"],
+                    "planned_place_pose": plan["planned_place_pose"],
+                    "workspace_x_mm": list(workspace_x_mm),
+                    "workspace_y_mm": list(workspace_y_mm),
+                    "use_depth_module": bool(args.use_depth_module),
+                },
+            )
 
         if not args.execute:
             print("[VISION_PICK_PLACE] dry-run only. Re-run with --execute to move the robot.")

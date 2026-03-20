@@ -42,8 +42,13 @@ except Exception as exc:  # pragma: no cover - depends on lab environment
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if THIS_DIR not in sys.path:
     sys.path.append(THIS_DIR)
+MOTION_DIR = os.path.normpath(os.path.join(THIS_DIR, "..", "motion"))
+if MOTION_DIR not in sys.path:
+    sys.path.append(MOTION_DIR)
 
 from aruco_tracker import ArucoTracker
+from depth_assist import DepthAssistModule
+from logger import write_jsonl_event
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -67,12 +72,21 @@ class MarkerWindow:
 
 
 class CaptureSession:
-    def __init__(self, buffer_size: int, marker_ids: list[int]) -> None:
+    def __init__(self, buffer_size: int, marker_ids: list[int], use_depth_module: bool = False) -> None:
         self.marker_ids = list(dict.fromkeys(int(marker_id) for marker_id in marker_ids))
         self.marker_windows = {
             marker_id: MarkerWindow(buffer=deque(maxlen=buffer_size))
             for marker_id in self.marker_ids
         }
+        self.depth_enabled = bool(use_depth_module)
+        self.depth_windows = (
+            {
+                marker_id: deque(maxlen=buffer_size)
+                for marker_id in self.marker_ids
+            }
+            if self.depth_enabled
+            else {}
+        )
         self.lock = threading.Lock()
         self.frames = 0
 
@@ -80,6 +94,7 @@ class CaptureSession:
         self,
         poses: dict[int, tuple[float, float, float, float, float, float]],
         timestamp_s: float,
+        depth_observations: Optional[dict[int, dict[str, float]]] = None,
     ) -> None:
         with self.lock:
             self.frames += 1
@@ -93,6 +108,10 @@ class CaptureSession:
                 marker_window.last_pose = live_pose
                 marker_window.last_detection_ts = timestamp_s
                 marker_window.buffer.append(live_pose)
+                if self.depth_enabled and depth_observations is not None:
+                    depth_payload = depth_observations.get(marker_id)
+                    if depth_payload is not None:
+                        self.depth_windows[marker_id].append(dict(depth_payload))
 
     def status(self) -> dict[str, object]:
         with self.lock:
@@ -122,6 +141,11 @@ class CaptureSession:
                     marker_payload["window_summary"] = _summarize_pose_window(
                         [sample.pose for sample in marker_window.buffer]
                     )
+                if self.depth_enabled:
+                    depth_window = self.depth_windows[marker_id]
+                    marker_payload["depth_buffer_count"] = len(depth_window)
+                    if len(depth_window) > 0:
+                        marker_payload["depth_window_summary"] = _summarize_depth_window(list(depth_window))
                 payload["markers"][marker_id] = marker_payload
 
             return payload
@@ -138,6 +162,10 @@ class CaptureSession:
             summary["time_span_s"] = max(0.0, time_span_s)
             summary["first_timestamp_s"] = marker_window.buffer[0].timestamp_s
             summary["last_timestamp_s"] = marker_window.buffer[-1].timestamp_s
+            if self.depth_enabled:
+                depth_window = self.depth_windows.get(marker_id, deque())
+                if len(depth_window) > 0:
+                    summary["depth_summary"] = _summarize_depth_window(list(depth_window))
             return summary
 
 
@@ -220,7 +248,7 @@ def _resolve_device(device_id: Optional[str]) -> tuple[dai.DeviceInfo, str]:
     )
 
 
-def _build_v2_pipeline(fps: float) -> dai.Pipeline:
+def _build_v2_pipeline(fps: float, use_depth_module: bool = False) -> dai.Pipeline:
     pipeline = dai.Pipeline()
 
     mono_left = _create_node(pipeline, "MonoCamera")
@@ -231,6 +259,29 @@ def _build_v2_pipeline(fps: float) -> dai.Pipeline:
     xout_raw = _create_node(pipeline, "XLinkOut")
     xout_raw.setStreamName("rawL")
     mono_left.out.link(xout_raw.input)
+
+    if use_depth_module:
+        mono_right = _create_node(pipeline, "MonoCamera")
+        mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
+        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+        mono_right.setFps(fps)
+
+        stereo = _create_node(pipeline, "StereoDepth")
+        try:
+            stereo.setDepthAlign(dai.CameraBoardSocket.CAM_B)
+        except Exception:
+            pass
+        try:
+            stereo.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_7x7)
+        except Exception:
+            pass
+
+        mono_left.out.link(stereo.left)
+        mono_right.out.link(stereo.right)
+
+        xout_depth = _create_node(pipeline, "XLinkOut")
+        xout_depth.setStreamName("depth")
+        stereo.depth.link(xout_depth.input)
 
     return pipeline
 
@@ -289,6 +340,48 @@ def _format_pose_block(summary: dict[str, object]) -> str:
     )
 
 
+def _summarize_depth_window(depth_samples: list[dict[str, float]]) -> dict[str, float]:
+    def _series(key: str) -> np.ndarray:
+        return np.array([float(sample[key]) for sample in depth_samples if key in sample], dtype=np.float64)
+
+    payload = {"sample_count": float(len(depth_samples))}
+    center_depth = _series("center_depth_mm")
+    median_depth = _series("median_depth_mm")
+    depth_std = _series("std_depth_mm")
+    valid_fraction = _series("valid_fraction")
+    valid_pixels = _series("valid_pixel_count")
+    roi_area = _series("roi_area_px")
+
+    if center_depth.size > 0:
+        payload["median_center_depth_mm"] = float(np.median(center_depth))
+        payload["mean_center_depth_mm"] = float(np.mean(center_depth))
+    if median_depth.size > 0:
+        payload["median_depth_mm"] = float(np.median(median_depth))
+        payload["mean_depth_mm"] = float(np.mean(median_depth))
+    if depth_std.size > 0:
+        payload["std_depth_mm"] = float(np.mean(depth_std))
+    if valid_fraction.size > 0:
+        payload["mean_valid_fraction"] = float(np.mean(valid_fraction))
+    if valid_pixels.size > 0:
+        payload["mean_valid_pixel_count"] = float(np.mean(valid_pixels))
+    if roi_area.size > 0:
+        payload["mean_roi_area_px"] = float(np.mean(roi_area))
+    return payload
+
+
+def _format_depth_block(summary: dict[str, object]) -> str:
+    depth_summary = summary.get("depth_summary")
+    if not isinstance(depth_summary, dict):
+        return "depth=disabled_or_unavailable"
+    return (
+        "depth="
+        f"center={float(depth_summary.get('median_center_depth_mm', 0.0)):.1f}mm "
+        f"median={float(depth_summary.get('median_depth_mm', 0.0)):.1f}mm "
+        f"std={float(depth_summary.get('std_depth_mm', 0.0)):.1f}mm "
+        f"valid={float(depth_summary.get('mean_valid_fraction', 0.0)):.3f}"
+    )
+
+
 def _output_path(explicit_path: Optional[str]) -> str:
     if explicit_path:
         output_path = explicit_path
@@ -300,6 +393,16 @@ def _output_path(explicit_path: Optional[str]) -> str:
     output_dir = os.path.dirname(output_path) or "."
     os.makedirs(output_dir, exist_ok=True)
     return output_path
+
+
+def _write_depth_dataset_event(event_name: str, **fields) -> None:
+    payload = {
+        "event": event_name,
+        "module": "PERCEPTION",
+        "tool": "depth_module",
+    }
+    payload.update(fields)
+    write_jsonl_event("depth_dataset", payload)
 
 
 def _parse_robot_pose(raw: str) -> dict[str, Optional[float]]:
@@ -341,10 +444,12 @@ def _capture_worker_v2(
     tracker: ArucoTracker,
     session: CaptureSession,
     stop_event: threading.Event,
+    use_depth_module: bool = False,
 ) -> None:
-    pipeline = _build_v2_pipeline(fps=fps)
+    pipeline = _build_v2_pipeline(fps=fps, use_depth_module=use_depth_module)
     with dai.Device(pipeline, device_info) as device:
         queue = device.getOutputQueue("rawL", maxSize=4, blocking=False)
+        depth_queue = device.getOutputQueue("depth", maxSize=4, blocking=False) if use_depth_module else None
         calib = device.readCalibration()
         intrinsics = np.array(
             calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 720),
@@ -354,15 +459,24 @@ def _capture_worker_v2(
             calib.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B),
             dtype=np.float64,
         )
+        depth_module = DepthAssistModule() if use_depth_module else None
 
         while not stop_event.is_set():
             frame_packet = queue.get()
+            depth_packet = None
+            if depth_queue is not None:
+                try:
+                    depth_packet = depth_queue.tryGet()
+                except Exception:
+                    depth_packet = None
             _process_packet(
                 frame_packet=frame_packet,
                 tracker=tracker,
                 intrinsics=intrinsics,
                 dist_coeffs=dist_coeffs,
                 session=session,
+                depth_packet=depth_packet,
+                depth_module=depth_module,
             )
 
 
@@ -372,7 +486,11 @@ def _capture_worker_v3(
     tracker: ArucoTracker,
     session: CaptureSession,
     stop_event: threading.Event,
+    use_depth_module: bool = False,
 ) -> None:
+    if use_depth_module:
+        raise RuntimeError("Depth module is not implemented yet for the DepthAI v3 camera API path.")
+
     with _v3_pipeline_context(device_info) as pipeline:
         camera = _create_node(pipeline, "Camera").build(
             dai.CameraBoardSocket.CAM_B,
@@ -416,6 +534,8 @@ def _process_packet(
     intrinsics: np.ndarray,
     dist_coeffs: np.ndarray,
     session: CaptureSession,
+    depth_packet=None,
+    depth_module: Optional[DepthAssistModule] = None,
 ) -> None:
     frame = frame_packet.getCvFrame()
     if len(frame.shape) == 2:
@@ -423,8 +543,24 @@ def _process_packet(
     else:
         frame_bgr = frame
 
-    poses = tracker.compute_poses(frame_bgr, intrinsics, dist_coeffs)
-    session.record_frame(poses=poses, timestamp_s=time.time())
+    corners, ids, _ = tracker.detect_markers(frame_bgr)
+    if ids is None or len(ids) == 0:
+        session.record_frame(poses={}, timestamp_s=time.time(), depth_observations=None)
+        return
+
+    rvecs, tvecs = tracker.estimate_pose(corners, ids, intrinsics, dist_coeffs)
+    poses = tracker.poses_from_estimates(ids, rvecs, tvecs)
+
+    depth_observations = None
+    if depth_module is not None and depth_packet is not None:
+        depth_frame = depth_packet.getFrame()
+        depth_observations = depth_module.extract_marker_depth(corners, ids, depth_frame)
+
+    session.record_frame(
+        poses=poses,
+        timestamp_s=time.time(),
+        depth_observations=depth_observations,
+    )
 
 
 def _start_capture_thread(
@@ -432,6 +568,7 @@ def _start_capture_thread(
     fps: float,
     session: CaptureSession,
     stop_event: threading.Event,
+    use_depth_module: bool = False,
 ) -> threading.Thread:
     tracker = ArucoTracker()
 
@@ -452,6 +589,7 @@ def _start_capture_thread(
             "tracker": tracker,
             "session": session,
             "stop_event": stop_event,
+            "use_depth_module": bool(use_depth_module),
         },
         name="phase2-capture",
         daemon=True,
@@ -501,6 +639,11 @@ def _interactive_loop(
                             "[PHASE2] "
                             + _format_pose_block(marker_status["window_summary"])
                         )
+                    if "depth_window_summary" in marker_status:
+                        print(
+                            "[PHASE2] "
+                            + _format_depth_block({"depth_summary": marker_status["depth_window_summary"]})
+                        )
                 continue
 
             if command in {"capture", "c", ""}:
@@ -533,6 +676,8 @@ def _interactive_loop(
 
                 print(f"[PHASE2] Camera window ready for marker {selected_marker_id}.")
                 print("[PHASE2] " + _format_pose_block(summary))
+                if "depth_summary" in summary:
+                    print("[PHASE2] " + _format_depth_block(summary))
 
                 label = input("sample label: ").strip() or f"sample_{sample_index + 1:02d}"
 
@@ -561,6 +706,20 @@ def _interactive_loop(
                 }
                 handle.write(json.dumps(record) + "\n")
                 handle.flush()
+                if "depth_summary" in summary:
+                    _write_depth_dataset_event(
+                        "depth_capture_sample",
+                        sample_label=label,
+                        sample_index=int(sample_index),
+                        device_id=device_id,
+                        device_label=device_label,
+                        marker_id=int(selected_marker_id),
+                        camera_window=summary,
+                        depth_summary=summary["depth_summary"],
+                        robot_pose=robot_pose,
+                        output_path=output_path,
+                        notes=notes,
+                    )
 
                 sample_index += 1
                 print(
@@ -624,6 +783,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional output JSONL path. Defaults under Robotics/perception/calibration_data/.",
     )
+    parser.add_argument(
+        "--use-depth-module",
+        action="store_true",
+        help=(
+            "Enable the optional perception-side stereo depth module for this workflow. "
+            "This stays inside Robotics/perception and does not affect deterministic control paths."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -640,17 +807,23 @@ def main() -> int:
 
     print(
         f"[PHASE2] Using device {resolved_device_id} "
-        f"label={args.device_label} marker_ids={marker_ids}"
+        f"label={args.device_label} marker_ids={marker_ids} "
+        f"use_depth_module={bool(args.use_depth_module)}"
     )
     print(f"[PHASE2] Writing captures to {output_path}")
 
-    session = CaptureSession(buffer_size=args.buffer_size, marker_ids=marker_ids)
+    session = CaptureSession(
+        buffer_size=args.buffer_size,
+        marker_ids=marker_ids,
+        use_depth_module=bool(args.use_depth_module),
+    )
     stop_event = threading.Event()
     thread = _start_capture_thread(
         device_info=device_info,
         fps=args.fps,
         session=session,
         stop_event=stop_event,
+        use_depth_module=bool(args.use_depth_module),
     )
 
     def _request_stop(_signum=None, _frame=None) -> None:

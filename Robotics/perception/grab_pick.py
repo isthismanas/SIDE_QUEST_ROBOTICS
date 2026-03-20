@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         help="Free-form device label for logging.",
     )
     parser.add_argument("--fps", type=float, default=20.0, help="Perception capture FPS.")
+    parser.add_argument(
+        "--use-depth-module",
+        action="store_true",
+        help="Enable the optional perception-side depth module for this workflow.",
+    )
     parser.add_argument("--buffer-size", type=int, default=60, help="Rolling detection buffer size.")
     parser.add_argument("--min-samples", type=int, default=20, help="Minimum buffered detections before planning.")
     parser.add_argument("--timeout-s", type=float, default=20.0, help="Maximum wait time for a stable detection window.")
@@ -206,7 +211,11 @@ def _plan_pick_from_marker(
     median_pose = summary["median_pose"]
     camera_x_m = float(median_pose["x_m"])
     camera_y_m = float(median_pose["y_m"])
-    robot_xy, reason = vision_bridge.camera_xy_to_pick_robot_xy_mm(camera_x_m, camera_y_m)
+    robot_xy, reason = vision_bridge.camera_pose_to_pick_robot_xy_mm(
+        camera_x_m,
+        camera_y_m,
+        camera_pose=median_pose,
+    )
     if robot_xy is None:
         raise RuntimeError(f"camera_xy_to_robot_xy_mm failed: {reason}")
 
@@ -303,13 +312,18 @@ def main() -> int:
 
     marker_id = int(args.marker_id)
     device_info, resolved_device_id = _resolve_device(args.device_id)
-    session = CaptureSession(buffer_size=int(args.buffer_size), marker_ids=[marker_id])
+    session = CaptureSession(
+        buffer_size=int(args.buffer_size),
+        marker_ids=[marker_id],
+        use_depth_module=bool(args.use_depth_module),
+    )
     stop_event = threading.Event()
     capture_thread = _start_capture_thread(
         device_info=device_info,
         fps=float(args.fps),
         session=session,
         stop_event=stop_event,
+        use_depth_module=bool(args.use_depth_module),
     )
 
     def _request_stop(_signum=None, _frame=None) -> None:
@@ -325,13 +339,15 @@ def main() -> int:
 
         print(
             f"[GRAB_PICK] marker_id={marker_id} device_id={resolved_device_id} "
-            f"device_label={args.device_label} execute={bool(args.execute)}"
+            f"device_label={args.device_label} execute={bool(args.execute)} "
+            f"use_depth_module={bool(args.use_depth_module)}"
         )
         _write_grab_pick_event(
             "grab_pick_start",
             marker_id=marker_id,
             device_id=resolved_device_id,
             device_label=args.device_label,
+            use_depth_module=bool(args.use_depth_module),
             execute=bool(args.execute),
             started_at_utc=_timestamp_utc(),
         )
@@ -344,6 +360,8 @@ def main() -> int:
             timeout_s=float(args.timeout_s),
         )
         print("[GRAB_PICK] stable summary " + _format_pose_block(summary))
+        if "depth_summary" in summary:
+            print(f"[GRAB_PICK] depth summary={summary['depth_summary']}")
 
         workspace_x_mm, workspace_y_mm = _workspace_bounds(args)
         try:
@@ -356,9 +374,10 @@ def main() -> int:
             )
         except Exception as exc:
             median_pose = summary["median_pose"]
-            robot_xy, robot_xy_reason = vision_bridge.camera_xy_to_pick_robot_xy_mm(
+            robot_xy, robot_xy_reason = vision_bridge.camera_pose_to_pick_robot_xy_mm(
                 float(median_pose["x_m"]),
                 float(median_pose["y_m"]),
+                camera_pose=median_pose,
             )
             failure_payload = {
                 "marker_id": marker_id,
@@ -399,6 +418,36 @@ def main() -> int:
             workspace_y_mm=list(workspace_y_mm),
             camera_pose_summary=summary,
         )
+        if "depth_summary" in summary:
+            _write_grab_pick_event(
+                "grab_pick_depth_summary",
+                marker_id=marker_id,
+                target_id=plan["target_id"],
+                depth_summary=summary["depth_summary"],
+            )
+            write_jsonl_event(
+                "depth_dataset",
+                {
+                    "event": "depth_grab_pick_summary",
+                    "module": "PERCEPTION",
+                    "tool": "grab_pick",
+                    "marker_id": int(marker_id),
+                    "target_id": plan["target_id"],
+                    "template_target_id": plan["template_target_id"],
+                    "stack_level": int(plan["stack_level"]),
+                    "camera_pose_summary": summary,
+                    "depth_summary": summary["depth_summary"],
+                    "computed_robot_xy_mm": {
+                        "x": round(float(plan["computed_robot_xy_mm"][0]), 3),
+                        "y": round(float(plan["computed_robot_xy_mm"][1]), 3),
+                    },
+                    "planned_pick_pose": plan["planned_pick_pose"],
+                    "planned_hover_pose": plan["planned_hover_pose"],
+                    "workspace_x_mm": list(workspace_x_mm),
+                    "workspace_y_mm": list(workspace_y_mm),
+                    "use_depth_module": bool(args.use_depth_module),
+                },
+            )
 
         if not args.execute:
             print("[GRAB_PICK] dry-run only. Re-run with --execute to move the robot.")

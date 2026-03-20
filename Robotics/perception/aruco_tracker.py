@@ -120,7 +120,10 @@ class ArucoTracker:
             return {}
 
         rvecs, tvecs = self.estimate_pose(corners, ids, camera_matrix, dist_coeffs)
-        
+        return self.poses_from_estimates(ids, rvecs, tvecs)
+
+    def poses_from_estimates(self, ids, rvecs, tvecs):
+        """Build pose tuples from already-estimated marker detections."""
         poses = {}
         for i, m_id in enumerate(ids.flatten()):
             rvec = rvecs[i]
@@ -142,5 +145,5 @@ class ArucoTracker:
                 
             x, y, z = tvec.flatten()
             poses[int(m_id)] = (x, y, z, roll, pitch, yaw)
-            
+
         return poses

@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+from datetime import datetime, timezone
+from typing import Any
+
+import numpy as np
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+MOTION_DIR = os.path.normpath(os.path.join(THIS_DIR, "..", "motion"))
+
+if THIS_DIR not in sys.path:
+    sys.path.append(THIS_DIR)
+if MOTION_DIR not in sys.path:
+    sys.path.append(MOTION_DIR)
+
+import robot_config as cfg
+import vision_bridge
+import vision_pick_ml
+
+
+def _load_jsonl(path: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                rows.append(json.loads(stripped))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in {path} line {line_number}: {exc}") from exc
+    return rows
+
+
+def _default_input_jsonl() -> str:
+    solution_path = str(getattr(cfg, "VISION_CALIBRATION_JSON", "")).strip()
+    if solution_path and os.path.exists(solution_path):
+        with open(solution_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        input_jsonl = str(payload.get("input_jsonl", "")).strip()
+        if input_jsonl and os.path.exists(input_jsonl):
+            return input_jsonl
+    return os.path.join(THIS_DIR, "calibration_data", "pick_plane_marker13_20260318.jsonl")
+
+
+def _default_output_json() -> str:
+    return os.path.join(THIS_DIR, "calibration_data", "pick_plane_marker13_20260318_ml_residual.json")
+
+
+def _feature_vector(record: dict[str, Any], feature_names: tuple[str, ...]) -> tuple[float, ...]:
+    median_pose = dict(record["camera_window"]["median_pose"])
+    feature_map, reason = vision_pick_ml.feature_map_from_camera_pose(median_pose)
+    if feature_map is None:
+        raise ValueError(f"Unable to extract features: {reason}")
+    return tuple(float(feature_map[name]) for name in feature_names)
+
+
+def _base_pick_xy(record: dict[str, Any]) -> tuple[float, float]:
+    median_pose = dict(record["camera_window"]["median_pose"])
+    robot_xy, reason = vision_bridge.camera_xy_to_pick_robot_xy_mm_base(
+        float(median_pose["x_m"]),
+        float(median_pose["y_m"]),
+    )
+    if robot_xy is None:
+        raise ValueError(f"Base pickup projection unavailable: {reason}")
+    return float(robot_xy[0]), float(robot_xy[1])
+
+
+def _actual_pick_xy(record: dict[str, Any]) -> tuple[float, float]:
+    robot_pose = dict(record["robot_pose"])
+    return float(robot_pose["x_mm"]), float(robot_pose["y_mm"])
+
+
+def _as_mm_norm(dx_mm: float, dy_mm: float) -> float:
+    return math.sqrt((dx_mm * dx_mm) + (dy_mm * dy_mm))
+
+
+def _predict_from_arrays(
+    feature_matrix: np.ndarray,
+    residual_matrix: np.ndarray,
+    feature_mean: np.ndarray,
+    feature_scale: np.ndarray,
+    feature_vector: np.ndarray,
+    *,
+    knn_k: int,
+    max_neighbor_distance: float,
+    max_correction_norm_mm: float,
+    weight_power: float,
+    exclude_index: int | None = None,
+) -> tuple[np.ndarray | None, str]:
+    if feature_matrix.shape[0] == 0:
+        return None, "no_samples"
+
+    distances: list[tuple[float, int]] = []
+    for index in range(feature_matrix.shape[0]):
+        if exclude_index is not None and index == exclude_index:
+            continue
+        normalized = (feature_vector - feature_matrix[index]) / feature_scale
+        distances.append((float(np.linalg.norm(normalized)), index))
+
+    if not distances:
+        return None, "no_neighbors"
+
+    distances.sort(key=lambda item: item[0])
+    neighbors = distances[: max(1, int(knn_k))]
+    if float(neighbors[0][0]) > float(max_neighbor_distance):
+        return None, f"neighbor_too_far:{neighbors[0][0]:.4f}"
+
+    weighted = np.zeros((2,), dtype=np.float64)
+    weight_total = 0.0
+    for distance, index in neighbors:
+        weight = 1.0 / ((max(float(distance), 1e-6)) ** float(weight_power))
+        weighted += weight * residual_matrix[index]
+        weight_total += weight
+
+    if weight_total <= 0.0:
+        return None, "zero_weight"
+
+    predicted = weighted / weight_total
+    norm_mm = float(np.linalg.norm(predicted))
+    if max_correction_norm_mm > 0.0 and norm_mm > float(max_correction_norm_mm):
+        predicted = predicted * (float(max_correction_norm_mm) / norm_mm)
+        return predicted, "ok_clamped"
+    return predicted, "ok"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Train a bounded kNN residual model for pickup-plane XY correction. "
+            "This model sits between the affine calibration and the manual pickup offsets."
+        )
+    )
+    parser.add_argument("--input-jsonl", default=_default_input_jsonl(), help="Calibration capture JSONL with paired camera and robot poses.")
+    parser.add_argument("--output-json", default=_default_output_json(), help="Output JSON path for the trained residual model.")
+    parser.add_argument("--knn-k", type=int, default=2, help="Number of neighbors to use for residual prediction.")
+    parser.add_argument(
+        "--max-neighbor-distance",
+        type=float,
+        default=1.5,
+        help="Maximum standardized neighbor distance allowed at inference time.",
+    )
+    parser.add_argument(
+        "--max-correction-mm",
+        type=float,
+        default=8.0,
+        help="Maximum residual correction norm applied by the model.",
+    )
+    parser.add_argument("--weight-power", type=float, default=2.0, help="Inverse-distance weighting power.")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    feature_names = tuple(vision_pick_ml.DEFAULT_FEATURE_NAMES)
+    records = _load_jsonl(args.input_jsonl)
+    if len(records) < 3:
+        raise ValueError(f"Need at least 3 calibration records, found {len(records)}.")
+
+    samples: list[dict[str, Any]] = []
+    for record in records:
+        feature_vector = _feature_vector(record, feature_names)
+        base_x_mm, base_y_mm = _base_pick_xy(record)
+        actual_x_mm, actual_y_mm = _actual_pick_xy(record)
+        residual_x_mm = actual_x_mm - base_x_mm
+        residual_y_mm = actual_y_mm - base_y_mm
+        samples.append(
+            {
+                "sample_label": str(record.get("sample_label", f"sample_{len(samples) + 1}")),
+                "marker_id": int(record.get("marker_id", -1)),
+                "features": tuple(float(value) for value in feature_vector),
+                "base_xy_mm": (base_x_mm, base_y_mm),
+                "actual_xy_mm": (actual_x_mm, actual_y_mm),
+                "residual_xy_mm": (residual_x_mm, residual_y_mm),
+            }
+        )
+
+    feature_matrix = np.array([sample["features"] for sample in samples], dtype=np.float64)
+    residual_matrix = np.array([sample["residual_xy_mm"] for sample in samples], dtype=np.float64)
+    base_matrix = np.array([sample["base_xy_mm"] for sample in samples], dtype=np.float64)
+    actual_matrix = np.array([sample["actual_xy_mm"] for sample in samples], dtype=np.float64)
+
+    feature_mean = feature_matrix.mean(axis=0)
+    feature_scale = feature_matrix.std(axis=0)
+    feature_scale = np.where(feature_scale < 1e-9, 1.0, feature_scale)
+
+    train_predictions: list[np.ndarray] = []
+    for index in range(feature_matrix.shape[0]):
+        predicted_residual, _ = _predict_from_arrays(
+            feature_matrix=feature_matrix,
+            residual_matrix=residual_matrix,
+            feature_mean=feature_mean,
+            feature_scale=feature_scale,
+            feature_vector=feature_matrix[index],
+            knn_k=int(args.knn_k),
+            max_neighbor_distance=float(args.max_neighbor_distance),
+            max_correction_norm_mm=float(args.max_correction_mm),
+            weight_power=float(args.weight_power),
+            exclude_index=None,
+        )
+        if predicted_residual is None:
+            predicted_residual = np.zeros((2,), dtype=np.float64)
+        train_predictions.append(base_matrix[index] + predicted_residual)
+
+    loo_predictions: list[np.ndarray] = []
+    loo_available = 0
+    for index in range(feature_matrix.shape[0]):
+        predicted_residual, _ = _predict_from_arrays(
+            feature_matrix=feature_matrix,
+            residual_matrix=residual_matrix,
+            feature_mean=feature_mean,
+            feature_scale=feature_scale,
+            feature_vector=feature_matrix[index],
+            knn_k=int(args.knn_k),
+            max_neighbor_distance=float(args.max_neighbor_distance),
+            max_correction_norm_mm=float(args.max_correction_mm),
+            weight_power=float(args.weight_power),
+            exclude_index=index,
+        )
+        if predicted_residual is None:
+            loo_predictions.append(base_matrix[index])
+            continue
+        loo_predictions.append(base_matrix[index] + predicted_residual)
+        loo_available += 1
+
+    train_predictions_arr = np.array(train_predictions, dtype=np.float64)
+    loo_predictions_arr = np.array(loo_predictions, dtype=np.float64)
+
+    base_error = actual_matrix - base_matrix
+    train_error = actual_matrix - train_predictions_arr
+    loo_error = actual_matrix - loo_predictions_arr
+
+    payload = {
+        "model_type": "pick_residual_knn_v1",
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source_calibration_jsonl": os.path.abspath(args.input_jsonl),
+        "description": (
+            "Bounded pickup-plane residual model. Runtime order is: affine calibration -> "
+            "optional ML residual correction -> manual pickup XY offsets."
+        ),
+        "feature_names": list(feature_names),
+        "feature_mean": [float(value) for value in feature_mean.tolist()],
+        "feature_scale": [float(value) for value in feature_scale.tolist()],
+        "knn_k": int(args.knn_k),
+        "max_neighbor_distance": float(args.max_neighbor_distance),
+        "max_correction_norm_mm": float(args.max_correction_mm),
+        "weight_power": float(args.weight_power),
+        "metrics": {
+            "sample_count": int(len(samples)),
+            "base_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(base_error), axis=1)))),
+            "train_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(train_error), axis=1)))),
+            "loo_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(loo_error), axis=1)))),
+            "loo_available_count": int(loo_available),
+        },
+        "samples": [],
+    }
+
+    for index, sample in enumerate(samples):
+        payload["samples"].append(
+            {
+                "sample_label": sample["sample_label"],
+                "marker_id": int(sample["marker_id"]),
+                "features": [float(value) for value in sample["features"]],
+                "base_xy_mm": {
+                    "x": float(sample["base_xy_mm"][0]),
+                    "y": float(sample["base_xy_mm"][1]),
+                },
+                "actual_xy_mm": {
+                    "x": float(sample["actual_xy_mm"][0]),
+                    "y": float(sample["actual_xy_mm"][1]),
+                },
+                "residual_xy_mm": {
+                    "x": float(sample["residual_xy_mm"][0]),
+                    "y": float(sample["residual_xy_mm"][1]),
+                    "norm": float(_as_mm_norm(sample["residual_xy_mm"][0], sample["residual_xy_mm"][1])),
+                },
+                "train_predicted_xy_mm": {
+                    "x": float(train_predictions_arr[index, 0]),
+                    "y": float(train_predictions_arr[index, 1]),
+                },
+                "loo_predicted_xy_mm": {
+                    "x": float(loo_predictions_arr[index, 0]),
+                    "y": float(loo_predictions_arr[index, 1]),
+                },
+            }
+        )
+
+    os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
+    with open(args.output_json, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+
+    print(f"[PICK_ML] input_jsonl={os.path.abspath(args.input_jsonl)}")
+    print(f"[PICK_ML] output_json={os.path.abspath(args.output_json)}")
+    print(f"[PICK_ML] sample_count={payload['metrics']['sample_count']}")
+    print(f"[PICK_ML] base_rmse_total_mm={payload['metrics']['base_rmse_total_mm']:.3f}")
+    print(f"[PICK_ML] train_rmse_total_mm={payload['metrics']['train_rmse_total_mm']:.3f}")
+    print(f"[PICK_ML] loo_rmse_total_mm={payload['metrics']['loo_rmse_total_mm']:.3f}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

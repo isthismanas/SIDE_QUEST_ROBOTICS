@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import robot_config as cfg
+import vision_pick_ml
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,28 @@ def camera_xy_to_robot_xy_mm(cam_x_m: float, cam_y_m: float) -> tuple[Optional[t
     return robot_xy, "ok"
 
 
+def camera_xy_to_pick_robot_xy_mm_base(cam_x_m: float, cam_y_m: float) -> tuple[Optional[tuple[float, float]], str]:
+    robot_xy, reason = camera_xy_to_robot_xy_mm(cam_x_m, cam_y_m)
+    if robot_xy is None:
+        return None, reason
+    return robot_xy, "ok"
+
+
+def apply_pick_ml_residual_mm(
+    robot_x_mm: float,
+    robot_y_mm: float,
+    *,
+    camera_pose=None,
+) -> tuple[tuple[float, float], str]:
+    residual_xy_mm, reason = vision_pick_ml.predict_pick_residual_mm(camera_pose)
+    if residual_xy_mm is None:
+        return (float(robot_x_mm), float(robot_y_mm)), reason
+    return (
+        float(robot_x_mm) + float(residual_xy_mm[0]),
+        float(robot_y_mm) + float(residual_xy_mm[1]),
+    ), f"ml_applied:{reason}"
+
+
 def apply_pick_xy_offsets_mm(robot_x_mm: float, robot_y_mm: float) -> tuple[float, float]:
     return (
         float(robot_x_mm) + float(getattr(cfg, "VISION_PICK_X_OFFSET_MM", 0.0)),
@@ -103,8 +126,29 @@ def apply_pick_xy_offsets_mm(robot_x_mm: float, robot_y_mm: float) -> tuple[floa
     )
 
 
-def camera_xy_to_pick_robot_xy_mm(cam_x_m: float, cam_y_m: float) -> tuple[Optional[tuple[float, float]], str]:
-    robot_xy, reason = camera_xy_to_robot_xy_mm(cam_x_m, cam_y_m)
+def camera_pose_to_pick_robot_xy_mm(
+    cam_x_m: float,
+    cam_y_m: float,
+    *,
+    camera_pose=None,
+) -> tuple[Optional[tuple[float, float]], str]:
+    robot_xy, reason = camera_xy_to_pick_robot_xy_mm_base(cam_x_m, cam_y_m)
     if robot_xy is None:
         return None, reason
-    return apply_pick_xy_offsets_mm(robot_xy[0], robot_xy[1]), "ok"
+    corrected_xy, ml_reason = apply_pick_ml_residual_mm(
+        robot_xy[0],
+        robot_xy[1],
+        camera_pose=camera_pose,
+    )
+    return apply_pick_xy_offsets_mm(corrected_xy[0], corrected_xy[1]), f"ok:{ml_reason}"
+
+
+def camera_xy_to_pick_robot_xy_mm(cam_x_m: float, cam_y_m: float) -> tuple[Optional[tuple[float, float]], str]:
+    return camera_pose_to_pick_robot_xy_mm(
+        cam_x_m,
+        cam_y_m,
+        camera_pose={
+            "x_m": float(cam_x_m),
+            "y_m": float(cam_y_m),
+        },
+    )
