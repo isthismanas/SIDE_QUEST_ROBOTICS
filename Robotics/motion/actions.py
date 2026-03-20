@@ -19,6 +19,7 @@ Design:
 
 from __future__ import annotations
 
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -161,6 +162,58 @@ def _log_motion_trigger(handles: SystemHandles, event_name: str, **fields) -> No
         payload["tcp_pose_available"] = True
         payload["tcp_pose_mm_deg"] = _pose_dict(pose)
     _emit_motion_event(event_name, **payload)
+
+
+def _resolve_known_pick_target_id(target_label: str) -> Optional[str]:
+    text = str(target_label).strip().upper()
+    match = re.search(r"(P[1-7])", text)
+    if not match:
+        return None
+    target_id = str(match.group(1))
+    if target_id not in getattr(cfg, "PICKUP_POINTS", {}):
+        return None
+    return target_id
+
+
+def _emit_pick_runtime_residual_event(
+    handles: SystemHandles,
+    *,
+    motion_name: str,
+    target_label: str,
+    stack_level: int,
+    commanded_pick_pose: cfg_pose_type,
+) -> None:
+    tcp_pose = handles.robot.get_tcp_pose()
+    if tcp_pose is None:
+        return
+
+    payload: dict[str, object] = {
+        "event": "pickup_runtime_residual",
+        "module": "CONTROL",
+        "motion": motion_name,
+        "target_label": str(target_label),
+        "stack_level": int(stack_level),
+        "commanded_pick_pose_mm_deg": _pose_dict(commanded_pick_pose),
+        "tcp_pick_pose_mm_deg": _pose_dict(tcp_pose),
+        "residual_to_commanded_mm": {
+            "x": round(float(tcp_pose[0]) - float(commanded_pick_pose[0]), 3),
+            "y": round(float(tcp_pose[1]) - float(commanded_pick_pose[1]), 3),
+            "z": round(float(tcp_pose[2]) - float(commanded_pick_pose[2]), 3),
+        },
+    }
+
+    known_target_id = _resolve_known_pick_target_id(target_label)
+    if known_target_id is not None:
+        expected_pose = cfg.pick_target_pose(known_target_id)
+        payload["expected_pick_target_id"] = known_target_id
+        payload["expected_pick_pose_mm_deg"] = _pose_dict(expected_pose)
+        payload["residual_to_expected_mm"] = {
+            "x": round(float(tcp_pose[0]) - float(expected_pose[0]), 3),
+            "y": round(float(tcp_pose[1]) - float(expected_pose[1]), 3),
+            "z": round(float(tcp_pose[2]) - float(expected_pose[2]), 3),
+        }
+
+    write_jsonl_event("pickup_runtime_residual", payload)
 
 
 # ----------------------------
@@ -635,6 +688,13 @@ def _execute_pick_with_pose(
         commanded_pose=pick_pose,
         target_id=target_label,
         stack_level=int(stack_level),
+    )
+    _emit_pick_runtime_residual_event(
+        handles,
+        motion_name=motion_name,
+        target_label=target_label,
+        stack_level=int(stack_level),
+        commanded_pick_pose=pick_pose,
     )
 
     _log_motion_step(handles, motion_name, "gripper_close", "start", target_id=target_label, stack_level=int(stack_level))
