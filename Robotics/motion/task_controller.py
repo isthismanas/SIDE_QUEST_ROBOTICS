@@ -143,7 +143,7 @@ LEADERBOARD_PORT = 8090
 lb_ctx = lb.LeaderboardContext(mode=LEADERBOARD_MODE, official_event_id=OFFICIAL_EVENT_ID)
 
 # Hard timeout: 
-HARD_TIMEOUT_S = 300.0 # 5ish minutes for competition
+HARD_TIMEOUT_S = 300.0 # 300s for competition
 
 
 def _track_server_socket(sock: socket.socket) -> None:
