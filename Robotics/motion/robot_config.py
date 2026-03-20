@@ -126,7 +126,7 @@ VISION_PICK_ML_MODEL_JSON = os.path.join(
     "calibration_data",
     "pick_plane_marker13_20260318_ml_residual.json",
 )
-VISION_PICK_X_OFFSET_MM = -6.0
+VISION_PICK_X_OFFSET_MM = -3.0
 VISION_PICK_Y_OFFSET_MM = -32.0
 VISION_CALIBRATION_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
