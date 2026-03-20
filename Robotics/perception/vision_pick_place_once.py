@@ -84,6 +84,22 @@ def parse_args() -> argparse.Namespace:
         help="0-indexed tower level to place onto. Use 0 for T1, 1 for T2, etc.",
     )
     parser.add_argument(
+        "--max-count",
+        type=int,
+        default=None,
+        help=(
+            "Optional safety cap on how many detected blocks to stack. "
+            "If omitted, the workflow keeps stacking detected mapped targets until none remain "
+            "or tower capacity is reached."
+        ),
+    )
+    parser.add_argument(
+        "--max-detection-age-s",
+        type=float,
+        default=1.0,
+        help="Maximum allowed age for the last marker detection before a candidate is considered stale.",
+    )
+    parser.add_argument(
         "--workspace-x-min-mm",
         type=float,
         default=None,
@@ -215,6 +231,7 @@ def _select_stable_target(
     min_samples: int,
     max_xy_std_mm: float,
     timeout_s: float,
+    max_detection_age_s: float,
 ) -> tuple[str, int, dict[str, object]]:
     marker_map = dict(getattr(cfg, "VISION_PICK_MARKER_MAP", {}))
     deadline = time.time() + float(timeout_s)
@@ -238,6 +255,8 @@ def _select_stable_target(
             marker_status = status["markers"].get(int(marker_id), {})
             age_s = marker_status.get("last_detection_age_s")
             if age_s is None:
+                continue
+            if float(age_s) > float(max_detection_age_s):
                 continue
             candidates.append((float(age_s), int(marker_id), str(target_id), summary))
 
@@ -333,7 +352,7 @@ def _plan_cycle(
     }
 
 
-def _execute_cycle(plan: dict[str, object], home_after: bool) -> None:
+def _create_system_handles() -> actions.SystemHandles:
     robot = DobotDriver(robot_ip=cfg.ROBOT_IP, dashboard_port=cfg.DASHBOARD_PORT, timeout_s=cfg.SOCKET_TIMEOUT_S)
     gripper = DHGripperPGE(
         port=cfg.GRIPPER_PORT,
@@ -342,41 +361,46 @@ def _execute_cycle(plan: dict[str, object], home_after: bool) -> None:
     )
     handles = actions.SystemHandles(robot=robot, gripper=gripper)
     handles.combo_active = False
+    return handles
 
+
+def _close_system_handles(handles: actions.SystemHandles) -> None:
     try:
-        actions.arm_robot_once(handles)
-        actions.connect_gripper_once(handles)
-        handles.gripper.ensure_initialized()
-        actions.initialize_stack_session(handles)
-        actions.execute_pick_pose(
-            handles,
-            pick_pose=plan["planned_pick_pose"],
-            stack_level=int(plan["stack_level"]),
-            target_label=f"marker_{plan['marker_id']}->{plan['target_id']}",
-        )
-        actions.move_to_tower_hover(
-            handles,
-            int(plan["stack_level"]),
-            target_id=str(plan["target_id"]),
-        )
-        actions.complete_place_sequence(
-            handles,
-            int(plan["stack_level"]),
-            place_pose=plan["planned_place_pose"],
-            perform_neutral_exit=True,
-            target_id=str(plan["target_id"]),
-        )
-        if home_after:
-            actions.do_home(handles)
-    finally:
-        try:
-            gripper.disconnect()
-        except Exception:
-            pass
-        try:
-            robot.close()
-        except Exception:
-            pass
+        handles.gripper.disconnect()
+    except Exception:
+        pass
+    try:
+        handles.robot.close()
+    except Exception:
+        pass
+
+
+def _initialize_cycle_session(handles: actions.SystemHandles) -> None:
+    actions.arm_robot_once(handles)
+    actions.connect_gripper_once(handles)
+    handles.gripper.ensure_initialized()
+    actions.initialize_stack_session(handles)
+
+
+def _execute_cycle_with_handles(handles: actions.SystemHandles, plan: dict[str, object]) -> None:
+    actions.execute_pick_pose(
+        handles,
+        pick_pose=plan["planned_pick_pose"],
+        stack_level=int(plan["stack_level"]),
+        target_label=f"marker_{plan['marker_id']}->{plan['target_id']}",
+    )
+    actions.move_to_tower_hover(
+        handles,
+        int(plan["stack_level"]),
+        target_id=str(plan["target_id"]),
+    )
+    actions.complete_place_sequence(
+        handles,
+        int(plan["stack_level"]),
+        place_pose=plan["planned_place_pose"],
+        perform_neutral_exit=True,
+        target_id=str(plan["target_id"]),
+    )
 
 
 def main() -> int:
@@ -392,6 +416,18 @@ def main() -> int:
     )
 
     target_ids = _candidate_targets(args)
+    requested_max_count = None if args.max_count is None else max(1, int(args.max_count))
+    available_levels = max(0, int(cfg.stack_target_count()) - int(args.place_level))
+    if requested_max_count is not None and requested_max_count > len(target_ids):
+        raise RuntimeError(
+            f"Requested max_count={requested_max_count} exceeds available target set size={len(target_ids)} "
+            f"for targets={target_ids}"
+        )
+    if requested_max_count is not None and requested_max_count > available_levels:
+        raise RuntimeError(
+            f"Requested max_count={requested_max_count} exceeds remaining tower capacity={available_levels} "
+            f"from place_level={int(args.place_level)}"
+        )
     marker_ids = _candidate_markers(target_ids)
     if not marker_ids:
         raise RuntimeError(f"No pickup markers mapped for remaining targets={target_ids}")
@@ -424,7 +460,7 @@ def main() -> int:
 
         print(
             f"[VISION_PICK_PLACE] device_id={resolved_device_id} device_label={args.device_label} "
-            f"targets={target_ids} place_level={int(args.place_level)} execute={bool(args.execute)} "
+            f"targets={target_ids} place_level={int(args.place_level)} max_count={requested_max_count} execute={bool(args.execute)} "
             f"use_depth_module={bool(args.use_depth_module)}"
         )
         _write_cycle_event(
@@ -434,111 +470,158 @@ def main() -> int:
             use_depth_module=bool(args.use_depth_module),
             candidate_targets=target_ids,
             place_level=int(args.place_level),
+            max_count=requested_max_count,
             execute=bool(args.execute),
             started_at_utc=_timestamp_utc(),
         )
-
-        target_id, marker_id, summary = _select_stable_target(
-            session=session,
-            target_ids=target_ids,
-            min_samples=int(args.min_samples),
-            max_xy_std_mm=float(args.max_xy_std_mm),
-            timeout_s=float(args.timeout_s),
-        )
         workspace_x_mm, workspace_y_mm = _workspace_bounds(args)
-        plan = _plan_cycle(
-            target_id=target_id,
-            marker_id=marker_id,
-            summary=summary,
-            place_level=int(args.place_level),
-            workspace_x_mm=workspace_x_mm,
-            workspace_y_mm=workspace_y_mm,
+
+        remaining_targets = list(target_ids)
+        plans: list[dict[str, object]] = []
+        max_cycles = min(
+            len(remaining_targets),
+            available_levels,
+            requested_max_count if requested_max_count is not None else min(len(remaining_targets), available_levels),
         )
-        print(
-            "[VISION_PICK_PLACE] plan "
-            f"source={plan['target_id']} marker={plan['marker_id']} "
-            f"pick_xy=({plan['planned_pick_pose'][0]:.3f},{plan['planned_pick_pose'][1]:.3f}) "
-            f"tower_target={plan['tower_target_id']} place_xy=({plan['planned_place_pose'][0]:.3f},{plan['planned_place_pose'][1]:.3f})"
-        )
-        if "depth_summary" in summary:
-            print(f"[VISION_PICK_PLACE] depth summary={summary['depth_summary']}")
-        grid = plan["pickup_grid_diagnostics"]
-        print(
-            "[VISION_PICK_PLACE] pickup_grid "
-            f"source_template={grid['source_target_id']} "
-            f"delta_mm=({grid['source_delta_mm']['dx']:.3f},{grid['source_delta_mm']['dy']:.3f}) "
-            f"norm={grid['source_delta_mm']['norm']:.3f} "
-            f"nearest={grid['nearest_pick_target_id']} "
-            f"nearest_norm={grid['nearest_pick_delta_mm']['norm']:.3f}"
-        )
-        _write_cycle_event(
-            "vision_pick_place_plan",
-            target_id=plan["target_id"],
-            marker_id=plan["marker_id"],
-            stack_level=int(plan["stack_level"]),
-            tower_target_id=plan["tower_target_id"],
-            planned_pick_pose=plan["planned_pick_pose"],
-            planned_pick_hover_pose=plan["planned_pick_hover_pose"],
-            planned_place_pose=plan["planned_place_pose"],
-            planned_tower_hover_pose=plan["planned_tower_hover_pose"],
-            workspace_x_mm=list(workspace_x_mm),
-            workspace_y_mm=list(workspace_y_mm),
-            camera_pose_summary=summary,
-            pickup_grid_diagnostics=plan["pickup_grid_diagnostics"],
-        )
-        if "depth_summary" in summary:
+        for cycle_index in range(max_cycles):
+            try:
+                target_id, marker_id, summary = _select_stable_target(
+                    session=session,
+                    target_ids=remaining_targets,
+                    min_samples=int(args.min_samples),
+                    max_xy_std_mm=float(args.max_xy_std_mm),
+                    timeout_s=float(args.timeout_s),
+                    max_detection_age_s=float(args.max_detection_age_s),
+                )
+            except RuntimeError:
+                if cycle_index == 0:
+                    raise
+                print(
+                    f"[VISION_PICK_PLACE] no additional stable targets found after stacking {len(plans)} block(s); stopping."
+                )
+                break
+            plan = _plan_cycle(
+                target_id=target_id,
+                marker_id=marker_id,
+                summary=summary,
+                place_level=int(args.place_level) + cycle_index,
+                workspace_x_mm=workspace_x_mm,
+                workspace_y_mm=workspace_y_mm,
+            )
+            plans.append(plan)
+            remaining_targets = [candidate for candidate in remaining_targets if candidate != target_id]
+
+            print(
+                "[VISION_PICK_PLACE] plan "
+                f"cycle={cycle_index + 1}/{max_cycles} "
+                f"source={plan['target_id']} marker={plan['marker_id']} "
+                f"pick_xy=({plan['planned_pick_pose'][0]:.3f},{plan['planned_pick_pose'][1]:.3f}) "
+                f"tower_target={plan['tower_target_id']} place_xy=({plan['planned_place_pose'][0]:.3f},{plan['planned_place_pose'][1]:.3f})"
+            )
+            if "depth_summary" in summary:
+                print(f"[VISION_PICK_PLACE] depth summary={summary['depth_summary']}")
+            grid = plan["pickup_grid_diagnostics"]
+            print(
+                "[VISION_PICK_PLACE] pickup_grid "
+                f"source_template={grid['source_target_id']} "
+                f"delta_mm=({grid['source_delta_mm']['dx']:.3f},{grid['source_delta_mm']['dy']:.3f}) "
+                f"norm={grid['source_delta_mm']['norm']:.3f} "
+                f"nearest={grid['nearest_pick_target_id']} "
+                f"nearest_norm={grid['nearest_pick_delta_mm']['norm']:.3f}"
+            )
             _write_cycle_event(
-                "vision_pick_place_depth_summary",
+                "vision_pick_place_plan",
+                cycle_index=int(cycle_index),
+                cycle_count=max_cycles,
                 target_id=plan["target_id"],
                 marker_id=plan["marker_id"],
-                depth_summary=summary["depth_summary"],
+                stack_level=int(plan["stack_level"]),
+                tower_target_id=plan["tower_target_id"],
+                planned_pick_pose=plan["planned_pick_pose"],
+                planned_pick_hover_pose=plan["planned_pick_hover_pose"],
+                planned_place_pose=plan["planned_place_pose"],
+                planned_tower_hover_pose=plan["planned_tower_hover_pose"],
+                workspace_x_mm=list(workspace_x_mm),
+                workspace_y_mm=list(workspace_y_mm),
+                camera_pose_summary=summary,
+                pickup_grid_diagnostics=plan["pickup_grid_diagnostics"],
             )
-            write_jsonl_event(
-                "depth_dataset",
-                {
-                    "event": "depth_pick_place_summary",
-                    "module": "PERCEPTION",
-                    "tool": "vision_pick_place_once",
-                    "target_id": plan["target_id"],
-                    "marker_id": int(plan["marker_id"]),
-                    "stack_level": int(plan["stack_level"]),
-                    "tower_target_id": plan["tower_target_id"],
-                    "camera_pose_summary": summary,
-                    "depth_summary": summary["depth_summary"],
-                    "computed_robot_xy_mm": {
-                        "x": round(float(plan["computed_robot_xy_mm"][0]), 3),
-                        "y": round(float(plan["computed_robot_xy_mm"][1]), 3),
+            if "depth_summary" in summary:
+                _write_cycle_event(
+                    "vision_pick_place_depth_summary",
+                    cycle_index=int(cycle_index),
+                    target_id=plan["target_id"],
+                    marker_id=plan["marker_id"],
+                    depth_summary=summary["depth_summary"],
+                )
+                write_jsonl_event(
+                    "depth_dataset",
+                    {
+                        "event": "depth_pick_place_summary",
+                        "module": "PERCEPTION",
+                        "tool": "vision_pick_place_once",
+                        "cycle_index": int(cycle_index),
+                        "cycle_count": max_cycles,
+                        "target_id": plan["target_id"],
+                        "marker_id": int(plan["marker_id"]),
+                        "stack_level": int(plan["stack_level"]),
+                        "tower_target_id": plan["tower_target_id"],
+                        "camera_pose_summary": summary,
+                        "depth_summary": summary["depth_summary"],
+                        "computed_robot_xy_mm": {
+                            "x": round(float(plan["computed_robot_xy_mm"][0]), 3),
+                            "y": round(float(plan["computed_robot_xy_mm"][1]), 3),
+                        },
+                        "planned_pick_pose": plan["planned_pick_pose"],
+                        "planned_place_pose": plan["planned_place_pose"],
+                        "workspace_x_mm": list(workspace_x_mm),
+                        "workspace_y_mm": list(workspace_y_mm),
+                        "use_depth_module": bool(args.use_depth_module),
                     },
-                    "planned_pick_pose": plan["planned_pick_pose"],
-                    "planned_place_pose": plan["planned_place_pose"],
-                    "workspace_x_mm": list(workspace_x_mm),
-                    "workspace_y_mm": list(workspace_y_mm),
-                    "use_depth_module": bool(args.use_depth_module),
-                },
-            )
+                )
 
         if not args.execute:
             print("[VISION_PICK_PLACE] dry-run only. Re-run with --execute to move the robot.")
-            _write_cycle_event("vision_pick_place_dry_run", target_id=plan["target_id"], tower_target_id=plan["tower_target_id"])
+            _write_cycle_event(
+                "vision_pick_place_dry_run",
+                planned_cycle_count=len(plans),
+                planned_targets=[plan["target_id"] for plan in plans],
+                planned_tower_targets=[plan["tower_target_id"] for plan in plans],
+            )
             return 0
 
-        _write_cycle_event(
-            "vision_pick_place_execute_start",
-            target_id=plan["target_id"],
-            marker_id=plan["marker_id"],
-            stack_level=int(plan["stack_level"]),
-            tower_target_id=plan["tower_target_id"],
-        )
-        _execute_cycle(plan, home_after=bool(args.home_after))
-        _write_cycle_event(
-            "vision_pick_place_execute_complete",
-            target_id=plan["target_id"],
-            marker_id=plan["marker_id"],
-            stack_level=int(plan["stack_level"]),
-            tower_target_id=plan["tower_target_id"],
-            completed_at_utc=_timestamp_utc(),
-        )
-        print("[VISION_PICK_PLACE] cycle complete.")
+        if not plans:
+            raise RuntimeError("No stable pickup targets were available to plan.")
+
+        handles = _create_system_handles()
+        try:
+            _initialize_cycle_session(handles)
+            for cycle_index, plan in enumerate(plans):
+                _write_cycle_event(
+                    "vision_pick_place_execute_start",
+                    cycle_index=int(cycle_index),
+                    cycle_count=len(plans),
+                    target_id=plan["target_id"],
+                    marker_id=plan["marker_id"],
+                    stack_level=int(plan["stack_level"]),
+                    tower_target_id=plan["tower_target_id"],
+                )
+                _execute_cycle_with_handles(handles, plan)
+                _write_cycle_event(
+                    "vision_pick_place_execute_complete",
+                    cycle_index=int(cycle_index),
+                    cycle_count=len(plans),
+                    target_id=plan["target_id"],
+                    marker_id=plan["marker_id"],
+                    stack_level=int(plan["stack_level"]),
+                    tower_target_id=plan["tower_target_id"],
+                    completed_at_utc=_timestamp_utc(),
+                )
+            if bool(args.home_after):
+                actions.do_home(handles)
+        finally:
+            _close_system_handles(handles)
+        print(f"[VISION_PICK_PLACE] cycle complete. stacked={len(plans)}")
         return 0
     finally:
         stop_event.set()
