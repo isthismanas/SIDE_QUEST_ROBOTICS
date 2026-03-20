@@ -58,6 +58,10 @@ def _default_grab_pick_log_jsonl() -> str:
     return os.path.join(THIS_DIR, "logs", "grab_pick.jsonl")
 
 
+def _default_pickup_runtime_residual_jsonl() -> str:
+    return os.path.join(THIS_DIR, "logs", "pickup_runtime_residual.jsonl")
+
+
 def _feature_vector(record: dict[str, Any], feature_names: tuple[str, ...]) -> tuple[float, ...]:
     median_pose = dict(record["camera_window"]["median_pose"])
     feature_map, reason = vision_pick_ml.feature_map_from_camera_pose(median_pose)
@@ -202,6 +206,117 @@ def _load_log_confirmation_samples(
     return samples
 
 
+def _runtime_target_id(row: dict[str, Any]) -> str | None:
+    expected_target_id = row.get("expected_pick_target_id")
+    if isinstance(expected_target_id, str) and expected_target_id.strip():
+        return str(expected_target_id).strip().upper()
+    target_label = str(row.get("target_label", "")).strip().upper()
+    match = re.search(r"(P[1-7])", target_label)
+    if match:
+        return str(match.group(1))
+    return None
+
+
+def _build_plan_index(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    indexed: dict[tuple[str, str], dict[str, Any]] = {}
+    ambiguous: set[tuple[str, str]] = set()
+    for row in rows:
+        event_name = str(row.get("event", "")).strip()
+        if event_name not in {"vision_pick_place_plan", "grab_pick_plan"}:
+            continue
+        run_id = str(row.get("run_id", "")).strip()
+        if not run_id:
+            continue
+        target_id = str(row.get("target_id", "")).strip().upper()
+        if not target_id:
+            inferred_target_id, _ = _infer_actual_target_from_plan(row, max_target_distance_mm=1e9)
+            if inferred_target_id is None:
+                continue
+            target_id = inferred_target_id
+        key = (run_id, target_id)
+        if key in indexed:
+            ambiguous.add(key)
+        else:
+            indexed[key] = row
+    for key in ambiguous:
+        indexed.pop(key, None)
+    return indexed
+
+
+def _load_runtime_residual_samples(
+    plan_log_path: str,
+    runtime_log_path: str,
+    feature_names: tuple[str, ...],
+    *,
+    max_runtime_expected_residual_mm: float,
+) -> list[dict[str, Any]]:
+    plan_rows = _load_jsonl(plan_log_path)
+    runtime_rows = _load_jsonl(runtime_log_path)
+    plan_index = _build_plan_index(plan_rows)
+
+    samples: list[dict[str, Any]] = []
+    for row in runtime_rows:
+        event_name = str(row.get("event", "")).strip()
+        if event_name != "pickup_runtime_residual":
+            continue
+
+        run_id = str(row.get("run_id", "")).strip()
+        if not run_id:
+            continue
+        target_id = _runtime_target_id(row)
+        if target_id is None:
+            continue
+        residual_to_expected = row.get("residual_to_expected_mm")
+        if not isinstance(residual_to_expected, dict):
+            continue
+        residual_norm = math.sqrt(
+            float(residual_to_expected.get("x", 0.0)) ** 2
+            + float(residual_to_expected.get("y", 0.0)) ** 2
+        )
+        if residual_norm > float(max_runtime_expected_residual_mm):
+            continue
+
+        plan_row = plan_index.get((run_id, target_id))
+        if plan_row is None:
+            continue
+        camera_summary = plan_row.get("camera_pose_summary")
+        if not isinstance(camera_summary, dict):
+            continue
+
+        feature_vector = _feature_vector_from_camera_summary(camera_summary, feature_names)
+        base_x_mm, base_y_mm = _base_pick_xy_from_camera_summary(camera_summary)
+        actual_x_mm, actual_y_mm = _pick_target_xy_mm(target_id)
+        residual_x_mm = actual_x_mm - base_x_mm
+        residual_y_mm = actual_y_mm - base_y_mm
+        tcp_pose = row.get("tcp_pick_pose_mm_deg") if isinstance(row.get("tcp_pick_pose_mm_deg"), dict) else {}
+        samples.append(
+            {
+                "sample_label": f"runtime_{run_id}_{target_id}",
+                "marker_id": int(plan_row.get("marker_id", -1)),
+                "features": tuple(float(value) for value in feature_vector),
+                "base_xy_mm": (base_x_mm, base_y_mm),
+                "actual_xy_mm": (actual_x_mm, actual_y_mm),
+                "residual_xy_mm": (residual_x_mm, residual_y_mm),
+                "sample_source": "runtime_pick_residual",
+                "sample_source_path": os.path.abspath(runtime_log_path),
+                "actual_target_id": target_id,
+                "actual_target_reason": "runtime_expected_target",
+                "participant_name": str(plan_row.get("participant_name", "")),
+                "source_event": event_name,
+                "runtime_tcp_xy_mm": {
+                    "x": float(tcp_pose.get("x", 0.0)),
+                    "y": float(tcp_pose.get("y", 0.0)),
+                },
+                "runtime_residual_to_expected_mm": {
+                    "x": float(residual_to_expected.get("x", 0.0)),
+                    "y": float(residual_to_expected.get("y", 0.0)),
+                    "norm": float(residual_norm),
+                },
+            }
+        )
+    return samples
+
+
 def _as_mm_norm(dx_mm: float, dy_mm: float) -> float:
     return math.sqrt((dx_mm * dx_mm) + (dy_mm * dy_mm))
 
@@ -283,6 +398,25 @@ def parse_args() -> argparse.Namespace:
         default=12.0,
         help="Only accept a log-derived target label when its resolved target is within this distance threshold.",
     )
+    parser.add_argument(
+        "--use-runtime-residual-samples",
+        action="store_true",
+        help=(
+            "Supplement the dataset with runtime TCP residual samples by joining "
+            "pickup_runtime_residual.jsonl back to matching guarded plan logs."
+        ),
+    )
+    parser.add_argument(
+        "--pickup-runtime-residual-jsonl",
+        default=_default_pickup_runtime_residual_jsonl(),
+        help="Runtime pickup residual JSONL emitted during guarded execute picks.",
+    )
+    parser.add_argument(
+        "--max-runtime-expected-residual-mm",
+        type=float,
+        default=8.0,
+        help="Only trust runtime residual samples when the live TCP XY stayed within this distance of the expected P target.",
+    )
     parser.add_argument("--knn-k", type=int, default=2, help="Number of neighbors to use for residual prediction.")
     parser.add_argument(
         "--max-neighbor-distance",
@@ -338,6 +472,21 @@ def main() -> int:
         )
         samples.extend(log_samples)
         log_sample_count = len(log_samples)
+
+    runtime_sample_count = 0
+    if bool(args.use_runtime_residual_samples):
+        if not os.path.exists(args.grab_pick_log_jsonl):
+            raise ValueError(f"Plan log dataset not found for runtime joins: {args.grab_pick_log_jsonl}")
+        if not os.path.exists(args.pickup_runtime_residual_jsonl):
+            raise ValueError(f"Runtime residual dataset not found: {args.pickup_runtime_residual_jsonl}")
+        runtime_samples = _load_runtime_residual_samples(
+            args.grab_pick_log_jsonl,
+            args.pickup_runtime_residual_jsonl,
+            feature_names,
+            max_runtime_expected_residual_mm=float(args.max_runtime_expected_residual_mm),
+        )
+        samples.extend(runtime_samples)
+        runtime_sample_count = len(runtime_samples)
 
     feature_matrix = np.array([sample["features"] for sample in samples], dtype=np.float64)
     residual_matrix = np.array([sample["residual_xy_mm"] for sample in samples], dtype=np.float64)
@@ -399,6 +548,7 @@ def main() -> int:
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_calibration_jsonl": os.path.abspath(args.input_jsonl),
         "source_log_confirmation_jsonl": os.path.abspath(args.grab_pick_log_jsonl) if bool(args.use_log_confirmation_samples) else None,
+        "source_runtime_residual_jsonl": os.path.abspath(args.pickup_runtime_residual_jsonl) if bool(args.use_runtime_residual_samples) else None,
         "description": (
             "Bounded pickup-plane residual model. Runtime order is: affine calibration -> "
             "optional ML residual correction -> manual pickup XY offsets."
@@ -414,6 +564,7 @@ def main() -> int:
             "sample_count": int(len(samples)),
             "calibration_sample_count": int(len(records)),
             "log_confirmation_sample_count": int(log_sample_count),
+            "runtime_residual_sample_count": int(runtime_sample_count),
             "base_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(base_error), axis=1)))),
             "train_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(train_error), axis=1)))),
             "loo_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(loo_error), axis=1)))),
@@ -447,6 +598,8 @@ def main() -> int:
                 "actual_target_reason": sample.get("actual_target_reason"),
                 "participant_name": sample.get("participant_name"),
                 "source_event": sample.get("source_event"),
+                "runtime_tcp_xy_mm": sample.get("runtime_tcp_xy_mm"),
+                "runtime_residual_to_expected_mm": sample.get("runtime_residual_to_expected_mm"),
                 "train_predicted_xy_mm": {
                     "x": float(train_predictions_arr[index, 0]),
                     "y": float(train_predictions_arr[index, 1]),
@@ -468,6 +621,7 @@ def main() -> int:
     print(f"[PICK_ML] sample_count={payload['metrics']['sample_count']}")
     print(f"[PICK_ML] calibration_sample_count={payload['metrics']['calibration_sample_count']}")
     print(f"[PICK_ML] log_confirmation_sample_count={payload['metrics']['log_confirmation_sample_count']}")
+    print(f"[PICK_ML] runtime_residual_sample_count={payload['metrics']['runtime_residual_sample_count']}")
     print(f"[PICK_ML] base_rmse_total_mm={payload['metrics']['base_rmse_total_mm']:.3f}")
     print(f"[PICK_ML] train_rmse_total_mm={payload['metrics']['train_rmse_total_mm']:.3f}")
     print(f"[PICK_ML] loo_rmse_total_mm={payload['metrics']['loo_rmse_total_mm']:.3f}")
