@@ -126,21 +126,58 @@ def apply_pick_xy_offsets_mm(robot_x_mm: float, robot_y_mm: float) -> tuple[floa
     )
 
 
+def camera_pose_to_pick_robot_xy_mm_details(
+    cam_x_m: float,
+    cam_y_m: float,
+    *,
+    camera_pose=None,
+) -> tuple[Optional[dict[str, object]], str]:
+    base_xy, base_reason = camera_xy_to_pick_robot_xy_mm_base(cam_x_m, cam_y_m)
+    if base_xy is None:
+        return None, base_reason
+
+    ml_xy, ml_reason = apply_pick_ml_residual_mm(
+        base_xy[0],
+        base_xy[1],
+        camera_pose=camera_pose,
+    )
+    final_xy = apply_pick_xy_offsets_mm(ml_xy[0], ml_xy[1])
+    offset_xy_mm = (
+        float(getattr(cfg, "VISION_PICK_X_OFFSET_MM", 0.0)),
+        float(getattr(cfg, "VISION_PICK_Y_OFFSET_MM", 0.0)),
+    )
+    ml_delta_xy_mm = (float(ml_xy[0]) - float(base_xy[0]), float(ml_xy[1]) - float(base_xy[1]))
+    details = {
+        "base_xy_mm": (float(base_xy[0]), float(base_xy[1])),
+        "ml_corrected_xy_mm": (float(ml_xy[0]), float(ml_xy[1])),
+        "final_xy_mm": (float(final_xy[0]), float(final_xy[1])),
+        "offset_xy_mm": offset_xy_mm,
+        "ml_delta_xy_mm": {
+            "x": float(ml_delta_xy_mm[0]),
+            "y": float(ml_delta_xy_mm[1]),
+            "norm": ((float(ml_delta_xy_mm[0]) ** 2) + (float(ml_delta_xy_mm[1]) ** 2)) ** 0.5,
+        },
+        "base_reason": base_reason,
+        "ml_reason": ml_reason,
+    }
+    return details, f"ok:{ml_reason}"
+
+
 def camera_pose_to_pick_robot_xy_mm(
     cam_x_m: float,
     cam_y_m: float,
     *,
     camera_pose=None,
 ) -> tuple[Optional[tuple[float, float]], str]:
-    robot_xy, reason = camera_xy_to_pick_robot_xy_mm_base(cam_x_m, cam_y_m)
-    if robot_xy is None:
-        return None, reason
-    corrected_xy, ml_reason = apply_pick_ml_residual_mm(
-        robot_xy[0],
-        robot_xy[1],
+    details, reason = camera_pose_to_pick_robot_xy_mm_details(
+        cam_x_m,
+        cam_y_m,
         camera_pose=camera_pose,
     )
-    return apply_pick_xy_offsets_mm(corrected_xy[0], corrected_xy[1]), f"ok:{ml_reason}"
+    if details is None:
+        return None, reason
+    final_xy = details["final_xy_mm"]
+    return (float(final_xy[0]), float(final_xy[1])), reason
 
 
 def camera_xy_to_pick_robot_xy_mm(cam_x_m: float, cam_y_m: float) -> tuple[Optional[tuple[float, float]], str]:

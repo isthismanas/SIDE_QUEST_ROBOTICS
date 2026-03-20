@@ -104,6 +104,16 @@ def parse_args() -> argparse.Namespace:
         help="Optional participant/label written into JSONL logs.",
     )
     parser.add_argument(
+        "--enable-pick-ml",
+        action="store_true",
+        help="Enable the optional non-depth pickup residual model for this guarded run only.",
+    )
+    parser.add_argument(
+        "--pick-ml-model-json",
+        default=None,
+        help="Optional override path for the pickup residual model JSON used with --enable-pick-ml.",
+    )
+    parser.add_argument(
         "--home-after",
         action="store_true",
         help="Return to safe home after the pick completes.",
@@ -153,6 +163,34 @@ def _write_grab_pick_event(event_name: str, **fields) -> None:
     }
     payload.update(fields)
     write_jsonl_event("grab_pick", payload)
+
+
+def _configure_pick_ml(args: argparse.Namespace) -> str:
+    cfg.VISION_PICK_ML_ENABLED = bool(args.enable_pick_ml)
+    if args.pick_ml_model_json:
+        cfg.VISION_PICK_ML_MODEL_JSON = str(args.pick_ml_model_json)
+    return str(getattr(cfg, "VISION_PICK_ML_MODEL_JSON", "")).strip()
+
+
+def _projection_details_to_log(details: dict[str, object]) -> dict[str, object]:
+    base_xy = details["base_xy_mm"]
+    ml_xy = details["ml_corrected_xy_mm"]
+    final_xy = details["final_xy_mm"]
+    offsets = details["offset_xy_mm"]
+    ml_delta = dict(details["ml_delta_xy_mm"])
+    return {
+        "base_xy_mm": {"x": round(float(base_xy[0]), 3), "y": round(float(base_xy[1]), 3)},
+        "ml_corrected_xy_mm": {"x": round(float(ml_xy[0]), 3), "y": round(float(ml_xy[1]), 3)},
+        "final_xy_mm": {"x": round(float(final_xy[0]), 3), "y": round(float(final_xy[1]), 3)},
+        "offset_xy_mm": {"x": round(float(offsets[0]), 3), "y": round(float(offsets[1]), 3)},
+        "ml_delta_xy_mm": {
+            "x": round(float(ml_delta["x"]), 3),
+            "y": round(float(ml_delta["y"]), 3),
+            "norm": round(float(ml_delta["norm"]), 3),
+        },
+        "base_reason": details["base_reason"],
+        "ml_reason": details["ml_reason"],
+    }
 
 
 def _wait_for_stable_summary(session: CaptureSession, marker_id: int, min_samples: int, max_xy_std_mm: float, timeout_s: float):
@@ -211,13 +249,14 @@ def _plan_pick_from_marker(
     median_pose = summary["median_pose"]
     camera_x_m = float(median_pose["x_m"])
     camera_y_m = float(median_pose["y_m"])
-    robot_xy, reason = vision_bridge.camera_pose_to_pick_robot_xy_mm(
+    projection_details, reason = vision_bridge.camera_pose_to_pick_robot_xy_mm_details(
         camera_x_m,
         camera_y_m,
         camera_pose=median_pose,
     )
-    if robot_xy is None:
+    if projection_details is None:
         raise RuntimeError(f"camera_xy_to_robot_xy_mm failed: {reason}")
+    robot_xy = projection_details["final_xy_mm"]
 
     robot_x = float(robot_xy[0])
     robot_y = float(robot_xy[1])
@@ -261,6 +300,7 @@ def _plan_pick_from_marker(
         "workspace_x_mm": workspace_x_mm,
         "workspace_y_mm": workspace_y_mm,
         "computed_robot_xy_mm": (robot_x, robot_y),
+        "pick_projection": _projection_details_to_log(projection_details),
     }
 
 
@@ -301,6 +341,7 @@ def _execute_pick(plan: dict[str, object], home_after: bool) -> None:
 def main() -> int:
     args = parse_args()
     participant_name = str(args.participant_name).strip() or "grab_pick"
+    pick_ml_model_json = _configure_pick_ml(args)
     session_id = f"grab-{int(time.time())}-{uuid4().hex[:8]}"
     run_id = uuid4().hex
     set_jsonl_context(
@@ -340,7 +381,8 @@ def main() -> int:
         print(
             f"[GRAB_PICK] marker_id={marker_id} device_id={resolved_device_id} "
             f"device_label={args.device_label} execute={bool(args.execute)} "
-            f"use_depth_module={bool(args.use_depth_module)}"
+            f"use_depth_module={bool(args.use_depth_module)} "
+            f"pick_ml={bool(args.enable_pick_ml)}"
         )
         _write_grab_pick_event(
             "grab_pick_start",
@@ -348,6 +390,8 @@ def main() -> int:
             device_id=resolved_device_id,
             device_label=args.device_label,
             use_depth_module=bool(args.use_depth_module),
+            pick_ml_enabled=bool(args.enable_pick_ml),
+            pick_ml_model_json=pick_ml_model_json,
             execute=bool(args.execute),
             started_at_utc=_timestamp_utc(),
         )
@@ -374,7 +418,7 @@ def main() -> int:
             )
         except Exception as exc:
             median_pose = summary["median_pose"]
-            robot_xy, robot_xy_reason = vision_bridge.camera_pose_to_pick_robot_xy_mm(
+            projection_details, robot_xy_reason = vision_bridge.camera_pose_to_pick_robot_xy_mm_details(
                 float(median_pose["x_m"]),
                 float(median_pose["y_m"]),
                 camera_pose=median_pose,
@@ -385,12 +429,16 @@ def main() -> int:
                 "workspace_y_mm": list(workspace_y_mm),
                 "camera_pose_summary": summary,
                 "error": str(exc),
+                "pick_ml_enabled": bool(args.enable_pick_ml),
+                "pick_ml_model_json": pick_ml_model_json,
             }
-            if robot_xy is not None:
+            if projection_details is not None:
+                robot_xy = projection_details["final_xy_mm"]
                 failure_payload["computed_robot_xy_mm"] = {
                     "x": round(float(robot_xy[0]), 3),
                     "y": round(float(robot_xy[1]), 3),
                 }
+                failure_payload["pick_projection"] = _projection_details_to_log(projection_details)
             else:
                 failure_payload["computed_robot_xy_reason"] = robot_xy_reason
             _write_grab_pick_event("grab_pick_plan_rejected", **failure_payload)
@@ -399,7 +447,8 @@ def main() -> int:
             "[GRAB_PICK] plan "
             f"target={plan['target_id']} stack_level={plan['stack_level']} "
             f"pick_xy=({plan['planned_pick_pose'][0]:.3f},{plan['planned_pick_pose'][1]:.3f}) "
-            f"workspace_x={workspace_x_mm} workspace_y={workspace_y_mm}"
+            f"workspace_x={workspace_x_mm} workspace_y={workspace_y_mm} "
+            f"ml_reason={plan['pick_projection']['ml_reason']}"
         )
         _write_grab_pick_event(
             "grab_pick_plan",
@@ -417,6 +466,9 @@ def main() -> int:
             workspace_x_mm=list(workspace_x_mm),
             workspace_y_mm=list(workspace_y_mm),
             camera_pose_summary=summary,
+            pick_projection=plan["pick_projection"],
+            pick_ml_enabled=bool(args.enable_pick_ml),
+            pick_ml_model_json=pick_ml_model_json,
         )
         if "depth_summary" in summary:
             _write_grab_pick_event(

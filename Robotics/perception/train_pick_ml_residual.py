@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -53,6 +54,10 @@ def _default_output_json() -> str:
     return os.path.join(THIS_DIR, "calibration_data", "pick_plane_marker13_20260318_ml_residual.json")
 
 
+def _default_grab_pick_log_jsonl() -> str:
+    return os.path.join(THIS_DIR, "logs", "grab_pick.jsonl")
+
+
 def _feature_vector(record: dict[str, Any], feature_names: tuple[str, ...]) -> tuple[float, ...]:
     median_pose = dict(record["camera_window"]["median_pose"])
     feature_map, reason = vision_pick_ml.feature_map_from_camera_pose(median_pose)
@@ -75,6 +80,126 @@ def _base_pick_xy(record: dict[str, Any]) -> tuple[float, float]:
 def _actual_pick_xy(record: dict[str, Any]) -> tuple[float, float]:
     robot_pose = dict(record["robot_pose"])
     return float(robot_pose["x_mm"]), float(robot_pose["y_mm"])
+
+
+def _pick_target_xy_mm(target_id: str) -> tuple[float, float]:
+    pose = cfg.pick_target_pose(str(target_id).strip().upper())
+    return float(pose[0]), float(pose[1])
+
+
+def _feature_vector_from_camera_summary(summary: dict[str, Any], feature_names: tuple[str, ...]) -> tuple[float, ...]:
+    median_pose = dict(summary["median_pose"])
+    feature_map, reason = vision_pick_ml.feature_map_from_camera_pose(median_pose)
+    if feature_map is None:
+        raise ValueError(f"Unable to extract features from log camera summary: {reason}")
+    return tuple(float(feature_map[name]) for name in feature_names)
+
+
+def _base_pick_xy_from_camera_summary(summary: dict[str, Any]) -> tuple[float, float]:
+    median_pose = dict(summary["median_pose"])
+    robot_xy, reason = vision_bridge.camera_xy_to_pick_robot_xy_mm_base(
+        float(median_pose["x_m"]),
+        float(median_pose["y_m"]),
+    )
+    if robot_xy is None:
+        raise ValueError(f"Base pickup projection unavailable from log camera summary: {reason}")
+    return float(robot_xy[0]), float(robot_xy[1])
+
+
+def _infer_actual_target_from_plan(plan_event: dict[str, Any], max_target_distance_mm: float) -> tuple[str | None, str]:
+    participant_name = str(plan_event.get("participant_name", "")).strip().upper()
+    match = re.search(r"(^|[^A-Z0-9])(P[1-7])([^A-Z0-9]|$)", participant_name)
+    if match:
+        return str(match.group(2)), "participant_name"
+
+    diagnostics = plan_event.get("pickup_grid_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return None, "pickup_grid_missing"
+
+    source_target_id = diagnostics.get("source_target_id")
+    source_delta = diagnostics.get("source_delta_mm")
+    if isinstance(source_target_id, str) and isinstance(source_delta, dict):
+        source_norm = source_delta.get("norm")
+        if source_norm is not None and float(source_norm) <= float(max_target_distance_mm):
+            return str(source_target_id).strip().upper(), "source_delta"
+
+    nearest_target_id = diagnostics.get("nearest_pick_target_id")
+    nearest_delta = diagnostics.get("nearest_pick_delta_mm")
+    if isinstance(nearest_target_id, str) and isinstance(nearest_delta, dict):
+        nearest_norm = nearest_delta.get("norm")
+        if nearest_norm is not None and float(nearest_norm) <= float(max_target_distance_mm):
+            return str(nearest_target_id).strip().upper(), "nearest_delta"
+
+    return None, "target_unresolved"
+
+
+def _load_log_confirmation_samples(
+    path: str,
+    feature_names: tuple[str, ...],
+    *,
+    max_target_distance_mm: float,
+) -> list[dict[str, Any]]:
+    rows = _load_jsonl(path)
+    completed_keys: set[tuple[str, int | None, str]] = set()
+    for row in rows:
+        event_name = str(row.get("event", "")).strip()
+        if event_name not in {"vision_pick_place_execute_complete", "grab_pick_execute_complete"}:
+            continue
+        completed_keys.add(
+            (
+                str(row.get("run_id", "")),
+                None if row.get("cycle_index") is None else int(row.get("cycle_index")),
+                event_name,
+            )
+        )
+
+    samples: list[dict[str, Any]] = []
+    for row in rows:
+        event_name = str(row.get("event", "")).strip()
+        if event_name not in {"vision_pick_place_plan", "grab_pick_plan"}:
+            continue
+
+        completion_event = "vision_pick_place_execute_complete" if event_name == "vision_pick_place_plan" else "grab_pick_execute_complete"
+        run_key = (
+            str(row.get("run_id", "")),
+            None if row.get("cycle_index") is None else int(row.get("cycle_index")),
+            completion_event,
+        )
+        if run_key not in completed_keys:
+            continue
+
+        camera_summary = row.get("camera_pose_summary")
+        if not isinstance(camera_summary, dict):
+            continue
+
+        actual_target_id, target_reason = _infer_actual_target_from_plan(row, max_target_distance_mm)
+        if actual_target_id is None:
+            continue
+
+        feature_vector = _feature_vector_from_camera_summary(camera_summary, feature_names)
+        base_x_mm, base_y_mm = _base_pick_xy_from_camera_summary(camera_summary)
+        actual_x_mm, actual_y_mm = _pick_target_xy_mm(actual_target_id)
+        residual_x_mm = actual_x_mm - base_x_mm
+        residual_y_mm = actual_y_mm - base_y_mm
+        cycle_index = row.get("cycle_index")
+        label_suffix = f"cycle{int(cycle_index)}" if cycle_index is not None else "single"
+        samples.append(
+            {
+                "sample_label": f"log_{str(row.get('run_id', 'unknown'))}_{label_suffix}",
+                "marker_id": int(row.get("marker_id", -1)),
+                "features": tuple(float(value) for value in feature_vector),
+                "base_xy_mm": (base_x_mm, base_y_mm),
+                "actual_xy_mm": (actual_x_mm, actual_y_mm),
+                "residual_xy_mm": (residual_x_mm, residual_y_mm),
+                "sample_source": "log_confirmation",
+                "sample_source_path": os.path.abspath(path),
+                "actual_target_id": actual_target_id,
+                "actual_target_reason": target_reason,
+                "source_event": event_name,
+                "participant_name": str(row.get("participant_name", "")),
+            }
+        )
+    return samples
 
 
 def _as_mm_norm(dx_mm: float, dy_mm: float) -> float:
@@ -139,6 +264,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input-jsonl", default=_default_input_jsonl(), help="Calibration capture JSONL with paired camera and robot poses.")
     parser.add_argument("--output-json", default=_default_output_json(), help="Output JSON path for the trained residual model.")
+    parser.add_argument(
+        "--use-log-confirmation-samples",
+        action="store_true",
+        help=(
+            "Supplement the calibration dataset with successful guarded-run plans from grab_pick.jsonl "
+            "when the actual pickup target can be resolved defensibly."
+        ),
+    )
+    parser.add_argument(
+        "--grab-pick-log-jsonl",
+        default=_default_grab_pick_log_jsonl(),
+        help="Guarded-run JSONL log path used with --use-log-confirmation-samples.",
+    )
+    parser.add_argument(
+        "--max-log-target-distance-mm",
+        type=float,
+        default=12.0,
+        help="Only accept a log-derived target label when its resolved target is within this distance threshold.",
+    )
     parser.add_argument("--knn-k", type=int, default=2, help="Number of neighbors to use for residual prediction.")
     parser.add_argument(
         "--max-neighbor-distance",
@@ -178,8 +322,22 @@ def main() -> int:
                 "base_xy_mm": (base_x_mm, base_y_mm),
                 "actual_xy_mm": (actual_x_mm, actual_y_mm),
                 "residual_xy_mm": (residual_x_mm, residual_y_mm),
+                "sample_source": "calibration_capture",
+                "sample_source_path": os.path.abspath(args.input_jsonl),
             }
         )
+
+    log_sample_count = 0
+    if bool(args.use_log_confirmation_samples):
+        if not os.path.exists(args.grab_pick_log_jsonl):
+            raise ValueError(f"Log confirmation dataset not found: {args.grab_pick_log_jsonl}")
+        log_samples = _load_log_confirmation_samples(
+            args.grab_pick_log_jsonl,
+            feature_names,
+            max_target_distance_mm=float(args.max_log_target_distance_mm),
+        )
+        samples.extend(log_samples)
+        log_sample_count = len(log_samples)
 
     feature_matrix = np.array([sample["features"] for sample in samples], dtype=np.float64)
     residual_matrix = np.array([sample["residual_xy_mm"] for sample in samples], dtype=np.float64)
@@ -240,6 +398,7 @@ def main() -> int:
         "model_type": "pick_residual_knn_v1",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_calibration_jsonl": os.path.abspath(args.input_jsonl),
+        "source_log_confirmation_jsonl": os.path.abspath(args.grab_pick_log_jsonl) if bool(args.use_log_confirmation_samples) else None,
         "description": (
             "Bounded pickup-plane residual model. Runtime order is: affine calibration -> "
             "optional ML residual correction -> manual pickup XY offsets."
@@ -253,6 +412,8 @@ def main() -> int:
         "weight_power": float(args.weight_power),
         "metrics": {
             "sample_count": int(len(samples)),
+            "calibration_sample_count": int(len(records)),
+            "log_confirmation_sample_count": int(log_sample_count),
             "base_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(base_error), axis=1)))),
             "train_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(train_error), axis=1)))),
             "loo_rmse_total_mm": float(np.sqrt(np.mean(np.sum(np.square(loo_error), axis=1)))),
@@ -280,6 +441,12 @@ def main() -> int:
                     "y": float(sample["residual_xy_mm"][1]),
                     "norm": float(_as_mm_norm(sample["residual_xy_mm"][0], sample["residual_xy_mm"][1])),
                 },
+                "sample_source": str(sample.get("sample_source", "unknown")),
+                "sample_source_path": str(sample.get("sample_source_path", "")),
+                "actual_target_id": sample.get("actual_target_id"),
+                "actual_target_reason": sample.get("actual_target_reason"),
+                "participant_name": sample.get("participant_name"),
+                "source_event": sample.get("source_event"),
                 "train_predicted_xy_mm": {
                     "x": float(train_predictions_arr[index, 0]),
                     "y": float(train_predictions_arr[index, 1]),
@@ -299,6 +466,8 @@ def main() -> int:
     print(f"[PICK_ML] input_jsonl={os.path.abspath(args.input_jsonl)}")
     print(f"[PICK_ML] output_json={os.path.abspath(args.output_json)}")
     print(f"[PICK_ML] sample_count={payload['metrics']['sample_count']}")
+    print(f"[PICK_ML] calibration_sample_count={payload['metrics']['calibration_sample_count']}")
+    print(f"[PICK_ML] log_confirmation_sample_count={payload['metrics']['log_confirmation_sample_count']}")
     print(f"[PICK_ML] base_rmse_total_mm={payload['metrics']['base_rmse_total_mm']:.3f}")
     print(f"[PICK_ML] train_rmse_total_mm={payload['metrics']['train_rmse_total_mm']:.3f}")
     print(f"[PICK_ML] loo_rmse_total_mm={payload['metrics']['loo_rmse_total_mm']:.3f}")
