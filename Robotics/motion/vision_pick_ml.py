@@ -101,6 +101,9 @@ def _model_path() -> str:
         return ""
     if os.path.isabs(configured):
         return configured
+    cwd_candidate = os.path.abspath(configured)
+    if os.path.exists(cwd_candidate):
+        return cwd_candidate
     return os.path.abspath(os.path.join(os.path.dirname(__file__), configured))
 
 
