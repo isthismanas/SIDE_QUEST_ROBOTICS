@@ -30,6 +30,7 @@ import block_tracker
 from dobot_driver import DobotDriver
 from dh_gripper import DHGripperPGE
 import drift_engine
+import vision_bridge
 from logger import info, debug, warn, error, write_jsonl_event
 
 
@@ -201,6 +202,7 @@ def _emit_pick_runtime_residual_event(
             "z": round(float(tcp_pose[2]) - float(commanded_pick_pose[2]), 3),
         },
     }
+    payload.update(vision_bridge.current_pick_runtime_metadata())
 
     known_target_id = _resolve_known_pick_target_id(target_label)
     if known_target_id is not None:

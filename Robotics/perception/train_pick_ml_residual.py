@@ -62,6 +62,102 @@ def _default_pickup_runtime_residual_jsonl() -> str:
     return os.path.join(THIS_DIR, "logs", "pickup_runtime_residual.jsonl")
 
 
+def _canonical_lineage_path(path: str | None) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
+    marker = "/Robotics/perception/calibration_data/"
+    index = normalized.rfind(marker)
+    if index >= 0:
+        return normalized[index + 1 :]
+    return os.path.basename(normalized)
+
+
+def _parse_utc_timestamp(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _active_training_lineage(input_jsonl: str) -> dict[str, object] | None:
+    calibration_path = str(getattr(cfg, "VISION_CALIBRATION_JSON", "")).strip()
+    if not calibration_path:
+        return None
+    if not os.path.isabs(calibration_path):
+        calibration_path = os.path.abspath(os.path.join(MOTION_DIR, calibration_path))
+    if not os.path.exists(calibration_path):
+        return None
+
+    with open(calibration_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    resolved_input_jsonl = str(payload.get("input_jsonl", "")).strip() or os.path.abspath(input_jsonl)
+    return {
+        "calibration_json": calibration_path,
+        "calibration_json_label": _canonical_lineage_path(calibration_path),
+        "calibration_input_jsonl": resolved_input_jsonl,
+        "calibration_input_label": _canonical_lineage_path(resolved_input_jsonl),
+        "calibration_generated_at_utc": str(payload.get("generated_at_utc", "")).strip(),
+        "pick_offset_x_mm": float(getattr(cfg, "VISION_PICK_X_OFFSET_MM", 0.0)),
+        "pick_offset_y_mm": float(getattr(cfg, "VISION_PICK_Y_OFFSET_MM", 0.0)),
+    }
+
+
+def _row_pick_offset_xy_mm(row: dict[str, Any]) -> tuple[float, float] | None:
+    direct = row.get("vision_pick_offset_xy_mm")
+    if isinstance(direct, dict):
+        x = direct.get("x")
+        y = direct.get("y")
+        if x is not None and y is not None:
+            return float(x), float(y)
+
+    projection = row.get("pick_projection")
+    if isinstance(projection, dict):
+        nested = projection.get("offset_xy_mm")
+        if isinstance(nested, dict):
+            x = nested.get("x")
+            y = nested.get("y")
+            if x is not None and y is not None:
+                return float(x), float(y)
+    return None
+
+
+def _row_matches_training_lineage(row: dict[str, Any], lineage: dict[str, object]) -> bool:
+    if bool(row.get("pick_ml_enabled", False)):
+        return False
+
+    row_offsets = _row_pick_offset_xy_mm(row)
+    if row_offsets is None:
+        return False
+    if not (
+        math.isclose(row_offsets[0], float(lineage["pick_offset_x_mm"]), abs_tol=1e-6)
+        and math.isclose(row_offsets[1], float(lineage["pick_offset_y_mm"]), abs_tol=1e-6)
+    ):
+        return False
+
+    row_input_label = _canonical_lineage_path(row.get("vision_calibration_input_jsonl"))
+    row_calibration_label = _canonical_lineage_path(row.get("vision_calibration_json"))
+    expected_input_label = str(lineage["calibration_input_label"])
+    expected_calibration_label = str(lineage["calibration_json_label"])
+    if row_input_label or row_calibration_label:
+        if row_input_label and row_input_label != expected_input_label:
+            return False
+        if row_calibration_label and row_calibration_label != expected_calibration_label:
+            return False
+        return True
+
+    calibration_generated_at = _parse_utc_timestamp(str(lineage["calibration_generated_at_utc"]))
+    row_ts = _parse_utc_timestamp(row.get("ts_utc"))
+    if calibration_generated_at is None or row_ts is None:
+        return False
+    return row_ts >= calibration_generated_at
+
+
 def _feature_vector(record: dict[str, Any], feature_names: tuple[str, ...]) -> tuple[float, ...]:
     median_pose = dict(record["camera_window"]["median_pose"])
     feature_map, reason = vision_pick_ml.feature_map_from_camera_pose(median_pose)
@@ -142,7 +238,8 @@ def _load_log_confirmation_samples(
     feature_names: tuple[str, ...],
     *,
     max_target_distance_mm: float,
-) -> list[dict[str, Any]]:
+    lineage: dict[str, object] | None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     rows = _load_jsonl(path)
     completed_keys: set[tuple[str, int | None, str]] = set()
     for row in rows:
@@ -158,9 +255,15 @@ def _load_log_confirmation_samples(
         )
 
     samples: list[dict[str, Any]] = []
+    considered_plan_rows = 0
+    skipped_lineage_rows = 0
     for row in rows:
         event_name = str(row.get("event", "")).strip()
         if event_name not in {"vision_pick_place_plan", "grab_pick_plan"}:
+            continue
+        considered_plan_rows += 1
+        if lineage is not None and not _row_matches_training_lineage(row, lineage):
+            skipped_lineage_rows += 1
             continue
 
         completion_event = "vision_pick_place_execute_complete" if event_name == "vision_pick_place_plan" else "grab_pick_execute_complete"
@@ -203,7 +306,10 @@ def _load_log_confirmation_samples(
                 "participant_name": str(row.get("participant_name", "")),
             }
         )
-    return samples
+    return samples, {
+        "considered_plan_rows": considered_plan_rows,
+        "skipped_lineage_rows": skipped_lineage_rows,
+    }
 
 
 def _runtime_target_id(row: dict[str, Any]) -> str | None:
@@ -217,12 +323,18 @@ def _runtime_target_id(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _build_plan_index(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+def _build_plan_index(
+    rows: list[dict[str, Any]],
+    *,
+    lineage: dict[str, object] | None,
+) -> dict[tuple[str, str], dict[str, Any]]:
     indexed: dict[tuple[str, str], dict[str, Any]] = {}
     ambiguous: set[tuple[str, str]] = set()
     for row in rows:
         event_name = str(row.get("event", "")).strip()
         if event_name not in {"vision_pick_place_plan", "grab_pick_plan"}:
+            continue
+        if lineage is not None and not _row_matches_training_lineage(row, lineage):
             continue
         run_id = str(row.get("run_id", "")).strip()
         if not run_id:
@@ -249,16 +361,20 @@ def _load_runtime_residual_samples(
     feature_names: tuple[str, ...],
     *,
     max_runtime_expected_residual_mm: float,
-) -> list[dict[str, Any]]:
+    lineage: dict[str, object] | None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     plan_rows = _load_jsonl(plan_log_path)
     runtime_rows = _load_jsonl(runtime_log_path)
-    plan_index = _build_plan_index(plan_rows)
+    plan_index = _build_plan_index(plan_rows, lineage=lineage)
 
     samples: list[dict[str, Any]] = []
+    considered_runtime_rows = 0
+    joined_runtime_rows = 0
     for row in runtime_rows:
         event_name = str(row.get("event", "")).strip()
         if event_name != "pickup_runtime_residual":
             continue
+        considered_runtime_rows += 1
 
         run_id = str(row.get("run_id", "")).strip()
         if not run_id:
@@ -279,6 +395,7 @@ def _load_runtime_residual_samples(
         plan_row = plan_index.get((run_id, target_id))
         if plan_row is None:
             continue
+        joined_runtime_rows += 1
         camera_summary = plan_row.get("camera_pose_summary")
         if not isinstance(camera_summary, dict):
             continue
@@ -314,7 +431,10 @@ def _load_runtime_residual_samples(
                 },
             }
         )
-    return samples
+    return samples, {
+        "considered_runtime_rows": considered_runtime_rows,
+        "joined_runtime_rows": joined_runtime_rows,
+    }
 
 
 def _as_mm_norm(dx_mm: float, dy_mm: float) -> float:
@@ -440,6 +560,7 @@ def main() -> int:
     records = _load_jsonl(args.input_jsonl)
     if len(records) < 3:
         raise ValueError(f"Need at least 3 calibration records, found {len(records)}.")
+    lineage = _active_training_lineage(args.input_jsonl)
 
     samples: list[dict[str, Any]] = []
     for record in records:
@@ -462,28 +583,32 @@ def main() -> int:
         )
 
     log_sample_count = 0
+    log_lineage_stats = {"considered_plan_rows": 0, "skipped_lineage_rows": 0}
     if bool(args.use_log_confirmation_samples):
         if not os.path.exists(args.grab_pick_log_jsonl):
             raise ValueError(f"Log confirmation dataset not found: {args.grab_pick_log_jsonl}")
-        log_samples = _load_log_confirmation_samples(
+        log_samples, log_lineage_stats = _load_log_confirmation_samples(
             args.grab_pick_log_jsonl,
             feature_names,
             max_target_distance_mm=float(args.max_log_target_distance_mm),
+            lineage=lineage,
         )
         samples.extend(log_samples)
         log_sample_count = len(log_samples)
 
     runtime_sample_count = 0
+    runtime_lineage_stats = {"considered_runtime_rows": 0, "joined_runtime_rows": 0}
     if bool(args.use_runtime_residual_samples):
         if not os.path.exists(args.grab_pick_log_jsonl):
             raise ValueError(f"Plan log dataset not found for runtime joins: {args.grab_pick_log_jsonl}")
         if not os.path.exists(args.pickup_runtime_residual_jsonl):
             raise ValueError(f"Runtime residual dataset not found: {args.pickup_runtime_residual_jsonl}")
-        runtime_samples = _load_runtime_residual_samples(
+        runtime_samples, runtime_lineage_stats = _load_runtime_residual_samples(
             args.grab_pick_log_jsonl,
             args.pickup_runtime_residual_jsonl,
             feature_names,
             max_runtime_expected_residual_mm=float(args.max_runtime_expected_residual_mm),
+            lineage=lineage,
         )
         samples.extend(runtime_samples)
         runtime_sample_count = len(runtime_samples)
@@ -549,6 +674,7 @@ def main() -> int:
         "source_calibration_jsonl": os.path.abspath(args.input_jsonl),
         "source_log_confirmation_jsonl": os.path.abspath(args.grab_pick_log_jsonl) if bool(args.use_log_confirmation_samples) else None,
         "source_runtime_residual_jsonl": os.path.abspath(args.pickup_runtime_residual_jsonl) if bool(args.use_runtime_residual_samples) else None,
+        "training_lineage": lineage,
         "description": (
             "Bounded pickup-plane residual model. Runtime order is: affine calibration -> "
             "optional ML residual correction -> manual pickup XY offsets."
@@ -622,6 +748,18 @@ def main() -> int:
     print(f"[PICK_ML] calibration_sample_count={payload['metrics']['calibration_sample_count']}")
     print(f"[PICK_ML] log_confirmation_sample_count={payload['metrics']['log_confirmation_sample_count']}")
     print(f"[PICK_ML] runtime_residual_sample_count={payload['metrics']['runtime_residual_sample_count']}")
+    if bool(args.use_log_confirmation_samples):
+        print(
+            "[PICK_ML] "
+            f"log_plan_rows_considered={log_lineage_stats['considered_plan_rows']} "
+            f"log_plan_rows_skipped_lineage={log_lineage_stats['skipped_lineage_rows']}"
+        )
+    if bool(args.use_runtime_residual_samples):
+        print(
+            "[PICK_ML] "
+            f"runtime_rows_considered={runtime_lineage_stats['considered_runtime_rows']} "
+            f"runtime_rows_joined={runtime_lineage_stats['joined_runtime_rows']}"
+        )
     print(f"[PICK_ML] base_rmse_total_mm={payload['metrics']['base_rmse_total_mm']:.3f}")
     print(f"[PICK_ML] train_rmse_total_mm={payload['metrics']['train_rmse_total_mm']:.3f}")
     print(f"[PICK_ML] loo_rmse_total_mm={payload['metrics']['loo_rmse_total_mm']:.3f}")

@@ -454,6 +454,7 @@ def _log_cycle_plan(
     workspace_x_mm: tuple[float, float],
     workspace_y_mm: tuple[float, float],
 ) -> None:
+    lineage_metadata = vision_bridge.current_pick_runtime_metadata()
     print(
         "[VISION_PICK_PLACE] plan "
         f"cycle={cycle_index + 1}/{cycle_count} "
@@ -492,6 +493,7 @@ def _log_cycle_plan(
         pick_projection=plan["pick_projection"],
         pick_ml_enabled=bool(args.enable_pick_ml),
         pick_ml_model_json=pick_ml_model_json,
+        **lineage_metadata,
     )
     if "depth_summary" in summary:
         _write_cycle_event(

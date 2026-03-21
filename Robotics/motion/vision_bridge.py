@@ -12,6 +12,8 @@ import vision_pick_ml
 @dataclass(frozen=True)
 class PlanarAffineCalibration:
     source_path: str
+    input_jsonl: str
+    generated_at_utc: str
     coeffs: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
 
     def transform_xy_mm(self, camera_x_mm: float, camera_y_mm: float) -> tuple[float, float]:
@@ -58,8 +60,43 @@ def _load_planar_affine(path: str) -> PlanarAffineCalibration:
 
     return PlanarAffineCalibration(
         source_path=path,
+        input_jsonl=str(payload.get("input_jsonl", "")).strip(),
+        generated_at_utc=str(payload.get("generated_at_utc", "")).strip(),
         coeffs=(coeffs[0], coeffs[1], coeffs[2]),
     )
+
+
+def current_pick_runtime_metadata() -> dict[str, object]:
+    calibration, _reason = get_planar_affine()
+    model_path = str(getattr(cfg, "VISION_PICK_ML_MODEL_JSON", "")).strip()
+    if model_path and not os.path.isabs(model_path):
+        model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), model_path))
+
+    payload: dict[str, object] = {
+        "vision_pick_offset_xy_mm": {
+            "x": float(getattr(cfg, "VISION_PICK_X_OFFSET_MM", 0.0)),
+            "y": float(getattr(cfg, "VISION_PICK_Y_OFFSET_MM", 0.0)),
+        },
+        "vision_pick_ml_enabled_config": bool(getattr(cfg, "VISION_PICK_ML_ENABLED", False)),
+        "vision_pick_ml_model_json_config": model_path or None,
+    }
+    if calibration is not None:
+        payload.update(
+            {
+                "vision_calibration_json": calibration.source_path,
+                "vision_calibration_input_jsonl": calibration.input_jsonl or None,
+                "vision_calibration_generated_at_utc": calibration.generated_at_utc or None,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "vision_calibration_json": None,
+                "vision_calibration_input_jsonl": None,
+                "vision_calibration_generated_at_utc": None,
+            }
+        )
+    return payload
 
 
 def get_planar_affine() -> tuple[Optional[PlanarAffineCalibration], str]:

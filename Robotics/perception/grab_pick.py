@@ -450,6 +450,7 @@ def main() -> int:
             f"workspace_x={workspace_x_mm} workspace_y={workspace_y_mm} "
             f"ml_reason={plan['pick_projection']['ml_reason']}"
         )
+        lineage_metadata = vision_bridge.current_pick_runtime_metadata()
         _write_grab_pick_event(
             "grab_pick_plan",
             marker_id=marker_id,
@@ -469,6 +470,7 @@ def main() -> int:
             pick_projection=plan["pick_projection"],
             pick_ml_enabled=bool(args.enable_pick_ml),
             pick_ml_model_json=pick_ml_model_json,
+            **lineage_metadata,
         )
         if "depth_summary" in summary:
             _write_grab_pick_event(
