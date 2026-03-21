@@ -219,6 +219,12 @@ public class RobotCommandPipe : MonoBehaviour
             return;
         }
 
+        if (line.Equals("GAMEPLAY_COMPLETE", StringComparison.OrdinalIgnoreCase))
+        {
+            uiStateManager?.OnGameplayComplete();
+            return;
+        }
+
         if (line.Equals("NAME_SET", StringComparison.OrdinalIgnoreCase) ||
             line.StartsWith("NAME_SET ", StringComparison.OrdinalIgnoreCase))
         {

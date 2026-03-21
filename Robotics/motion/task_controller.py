@@ -1810,6 +1810,7 @@ def handle_command(cmd_str: str, source: str) -> None:
 
                 if tower_complete:
                     completion_end_mono = time.monotonic()
+                    _send_line_to_unity("GAMEPLAY_COMPLETE")
                     with _score_state_lock:
                         if pending_commit_level is not None and pending_commit_deadline is not None and completion_end_mono < pending_commit_deadline:
                             completion_finalize_pending = True
