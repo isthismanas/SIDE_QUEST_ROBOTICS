@@ -133,7 +133,7 @@ VISION_CALIBRATION_JSON = os.path.join(
     "..",
     "perception",
     "calibration_data",
-    "pick_plane_marker13_20260318_phase3_solution_20260318T050404Z.json",
+    "pick_plane_marker13_20260321_retry_phase3_solution.json",
 )
 VISION_PICK_MARKER_MAP = {
     "P1": 11,
