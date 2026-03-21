@@ -1,0 +1,1101 @@
+{
+  "model_type": "pick_residual_knn_v1",
+  "generated_at_utc": "2026-03-21T10:14:32.448981+00:00",
+  "source_calibration_jsonl": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+  "source_log_confirmation_jsonl": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+  "source_runtime_residual_jsonl": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/pickup_runtime_residual.jsonl",
+  "training_lineage": {
+    "calibration_json": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/motion/../perception/calibration_data/pick_plane_marker13_20260321_retry_phase3_solution.json",
+    "calibration_json_label": "pick_plane_marker13_20260321_retry_phase3_solution.json",
+    "calibration_input_jsonl": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+    "calibration_input_label": "Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+    "calibration_generated_at_utc": "2026-03-21T08:10:35.047765+00:00",
+    "pick_offset_x_mm": 0.0,
+    "pick_offset_y_mm": 0.0
+  },
+  "description": "Bounded pickup-plane residual model. Runtime order is: affine calibration -> optional ML residual correction -> manual pickup XY offsets.",
+  "feature_names": [
+    "camera_x_m",
+    "camera_y_m",
+    "camera_z_m",
+    "camera_pitch_rad",
+    "camera_yaw_rad"
+  ],
+  "feature_mean": [
+    0.10950188346615335,
+    -0.035114667721698654,
+    0.5332758840528586,
+    0.01472943402311762,
+    -0.6717486624575896
+  ],
+  "feature_scale": [
+    0.07173425061824039,
+    0.08817188594044079,
+    0.009595799111244686,
+    0.1543446024466924,
+    0.9456233131018467
+  ],
+  "knn_k": 2,
+  "max_neighbor_distance": 1.5,
+  "max_correction_norm_mm": 8.0,
+  "weight_power": 2.0,
+  "metrics": {
+    "sample_count": 26,
+    "calibration_sample_count": 18,
+    "log_confirmation_sample_count": 7,
+    "runtime_residual_sample_count": 1,
+    "base_rmse_total_mm": 3.6262785933605124,
+    "train_rmse_total_mm": 0.09389854035997112,
+    "loo_rmse_total_mm": 3.5792993370926363,
+    "loo_available_count": 17
+  },
+  "samples": [
+    {
+      "sample_label": "retrynp1",
+      "marker_id": 13,
+      "features": [
+        0.06716536086959946,
+        0.06635922075676645,
+        0.5321394112388439,
+        0.09593216318441508,
+        -0.8537480171628393
+      ],
+      "base_xy_mm": {
+        "x": 407.3238481223921,
+        "y": -67.54193713826265
+      },
+      "actual_xy_mm": {
+        "x": 404.2777,
+        "y": -67.4402
+      },
+      "residual_xy_mm": {
+        "x": -3.0461481223921396,
+        "y": 0.1017371382626493,
+        "norm": 3.047846588799218
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 404.2777000000021,
+        "y": -67.44019999999931
+      },
+      "loo_predicted_xy_mm": {
+        "x": 408.1726650823055,
+        "y": -67.04720189528227
+      }
+    },
+    {
+      "sample_label": "retrynp2",
+      "marker_id": 13,
+      "features": [
+        0.06426310548643833,
+        -0.023456839782431897,
+        0.5269442229643002,
+        -0.128077456113782,
+        -0.7118894471608216
+      ],
+      "base_xy_mm": {
+        "x": 323.0527928204332,
+        "y": -69.91754783246552
+      },
+      "actual_xy_mm": {
+        "x": 322.1816,
+        "y": -67.4405
+      },
+      "residual_xy_mm": {
+        "x": -0.8711928204331798,
+        "y": 2.477047832465516,
+        "norm": 2.6257842437444148
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 322.1816000000016,
+        "y": -67.44050000000361
+      },
+      "loo_predicted_xy_mm": {
+        "x": 323.41254371168753,
+        "y": -68.5832401152595
+      }
+    },
+    {
+      "sample_label": "retrynp3",
+      "marker_id": 13,
+      "features": [
+        0.12084450225694082,
+        0.017883885293387046,
+        0.5301409948101146,
+        0.36106354531412227,
+        -0.7450781609265493
+      ],
+      "base_xy_mm": {
+        "x": 360.7451919092672,
+        "y": -17.40700127746274
+      },
+      "actual_xy_mm": {
+        "x": 362.3366,
+        "y": -13.4532
+      },
+      "residual_xy_mm": {
+        "x": 1.5914080907327843,
+        "y": 3.9538012774627393,
+        "norm": 4.262056340889425
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 362.3365999999998,
+        "y": -13.453199999999335
+      },
+      "loo_predicted_xy_mm": {
+        "x": 360.7451919092672,
+        "y": -17.40700127746274
+      }
+    },
+    {
+      "sample_label": "retrynp4",
+      "marker_id": 13,
+      "features": [
+        0.12122881977173378,
+        -0.07012883535672051,
+        0.5271582378851876,
+        -0.11211427498177413,
+        -0.7842562667774311
+      ],
+      "base_xy_mm": {
+        "x": 278.102094298292,
+        "y": -16.730330239695533
+      },
+      "actual_xy_mm": {
+        "x": 278.495,
+        "y": -13.4533
+      },
+      "residual_xy_mm": {
+        "x": 0.39290570170800265,
+        "y": 3.2770302396955326,
+        "norm": 3.300500277581206
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 278.4949999999999,
+        "y": -13.45329999999924
+      },
+      "loo_predicted_xy_mm": {
+        "x": 278.44374203492254,
+        "y": -14.670505805661215
+      }
+    },
+    {
+      "sample_label": "retrynp5",
+      "marker_id": 13,
+      "features": [
+        0.19241135956158098,
+        0.06781808294616617,
+        0.5620051099676192,
+        0.09588539417445142,
+        -0.773482085640199
+      ],
+      "base_xy_mm": {
+        "x": 406.20872633696075,
+        "y": 49.01938712859496
+      },
+      "actual_xy_mm": {
+        "x": 403.8273,
+        "y": 40.8819
+      },
+      "residual_xy_mm": {
+        "x": -2.3814263369607716,
+        "y": -8.137487128594955,
+        "norm": 8.47879048959337
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 403.9617772327152,
+        "y": 41.34141736289973
+      },
+      "loo_predicted_xy_mm": {
+        "x": 406.20872633696075,
+        "y": 49.01938712859496
+      }
+    },
+    {
+      "sample_label": "retrynp6",
+      "marker_id": 13,
+      "features": [
+        0.17438581349841784,
+        -0.022276471919871782,
+        0.5198968819401737,
+        0.47760796873493966,
+        -0.7932256690302354
+      ],
+      "base_xy_mm": {
+        "x": 321.976234416511,
+        "y": 32.56951975063035
+      },
+      "actual_xy_mm": {
+        "x": 323.1832,
+        "y": 38.1754
+      },
+      "residual_xy_mm": {
+        "x": 1.2069655834890227,
+        "y": 5.605880249369655,
+        "norm": 5.734340353519293
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 323.18320000000017,
+        "y": 38.175399999999335
+      },
+      "loo_predicted_xy_mm": {
+        "x": 321.976234416511,
+        "y": 32.56951975063035
+      }
+    },
+    {
+      "sample_label": "retrynp7",
+      "marker_id": 13,
+      "features": [
+        0.18200084089264193,
+        -0.11319310696808033,
+        0.5407266482900487,
+        0.04342700969264298,
+        -0.8042024688676528
+      ],
+      "base_xy_mm": {
+        "x": 236.4631850210431,
+        "y": 39.98634646287246
+      },
+      "actual_xy_mm": {
+        "x": 238.8196,
+        "y": 36.9264
+      },
+      "residual_xy_mm": {
+        "x": 2.3564149789569058,
+        "y": -3.0599464628724604,
+        "norm": 3.8621190956129454
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 238.81959999999913,
+        "y": 36.92640000000289
+      },
+      "loo_predicted_xy_mm": {
+        "x": 236.4631850210431,
+        "y": 39.98634646287246
+      }
+    },
+    {
+      "sample_label": "retrynp8",
+      "marker_id": 13,
+      "features": [
+        0.12125879132878961,
+        -0.1562103148641789,
+        0.533873471837464,
+        0.22690312674987084,
+        -0.7721153126355876
+      ],
+      "base_xy_mm": {
+        "x": 197.27927637003575,
+        "y": -16.39044887459434
+      },
+      "actual_xy_mm": {
+        "x": 195.5783,
+        "y": -15.3111
+      },
+      "residual_xy_mm": {
+        "x": -1.7009763700357325,
+        "y": 1.0793488745943414,
+        "norm": 2.0145259006793657
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 195.57830000000092,
+        "y": -15.311100000000934
+      },
+      "loo_predicted_xy_mm": {
+        "x": 197.27927637003575,
+        "y": -16.39044887459434
+      }
+    },
+    {
+      "sample_label": "retrynp9",
+      "marker_id": 13,
+      "features": [
+        0.0404027047643217,
+        -0.15787165250446206,
+        0.5331221985599295,
+        0.036040898292990446,
+        -0.8066605388466663
+      ],
+      "base_xy_mm": {
+        "x": 197.32360714303306,
+        "y": -91.63729114467966
+      },
+      "actual_xy_mm": {
+        "x": 198.2078,
+        "y": -93.1787
+      },
+      "residual_xy_mm": {
+        "x": 0.8841928569669335,
+        "y": -1.5414088553203413,
+        "norm": 1.7770026076433634
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 198.20780000000144,
+        "y": -93.17870000000094
+      },
+      "loo_predicted_xy_mm": {
+        "x": 198.80716760075669,
+        "y": -93.22823216093877
+      }
+    },
+    {
+      "sample_label": "retrynp10",
+      "marker_id": 13,
+      "features": [
+        -0.0014427414774831945,
+        -0.198502330573597,
+        0.5357182626138348,
+        -0.03537774688598998,
+        -0.6854933938713738
+      ],
+      "base_xy_mm": {
+        "x": 160.0055158420942,
+        "y": -130.43564307648623
+      },
+      "actual_xy_mm": {
+        "x": 162.1308,
+        "y": -132.7787
+      },
+      "residual_xy_mm": {
+        "x": 2.1252841579057815,
+        "y": -2.343056923513757,
+        "norm": 3.1633445115369647
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 162.13079999999854,
+        "y": -132.77869999999905
+      },
+      "loo_predicted_xy_mm": {
+        "x": 160.18180507966306,
+        "y": -132.2325444929183
+      }
+    },
+    {
+      "sample_label": "retrynp11",
+      "marker_id": 13,
+      "features": [
+        0.20923871362154298,
+        -0.1988212474466862,
+        0.5228083310706971,
+        -0.060940462704117654,
+        -0.810283584696015
+      ],
+      "base_xy_mm": {
+        "x": 155.5262100529606,
+        "y": 65.64701330569349
+      },
+      "actual_xy_mm": {
+        "x": 153.1308,
+        "y": 67.7174
+      },
+      "residual_xy_mm": {
+        "x": -2.3954100529606137,
+        "y": 2.0703866943065066,
+        "norm": 3.1661475622254556
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 153.1308000000007,
+        "y": 67.71740000000031
+      },
+      "loo_predicted_xy_mm": {
+        "x": 155.5262100529606,
+        "y": 65.64701330569349
+      }
+    },
+    {
+      "sample_label": "retrynp12",
+      "marker_id": 13,
+      "features": [
+        0.2137010082508459,
+        0.09947845198372156,
+        0.5311961586023599,
+        0.010917638824900057,
+        -0.6935801851438839
+      ],
+      "base_xy_mm": {
+        "x": 435.5123833976774,
+        "y": 68.718943176392
+      },
+      "actual_xy_mm": {
+        "x": 436.4274,
+        "y": 69.2944
+      },
+      "residual_xy_mm": {
+        "x": 0.9150166023225665,
+        "y": 0.5754568236079933,
+        "norm": 1.0809282762343368
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 436.4274000000006,
+        "y": 69.29439999999738
+      },
+      "loo_predicted_xy_mm": {
+        "x": 436.20373573924985,
+        "y": 66.77469108092976
+      }
+    },
+    {
+      "sample_label": "retrynp13",
+      "marker_id": 13,
+      "features": [
+        -0.0023331702666404604,
+        0.07933492337569961,
+        0.5258204403438688,
+        0.20823774665762912,
+        -0.8237763836495557
+      ],
+      "base_xy_mm": {
+        "x": 420.885619387389,
+        "y": -132.27133731445008
+      },
+      "actual_xy_mm": {
+        "x": 421.8932,
+        "y": -130.839
+      },
+      "residual_xy_mm": {
+        "x": 1.0075806126109796,
+        "y": 1.4323373144500806,
+        "norm": 1.7512306739192258
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 421.8931999999979,
+        "y": -130.83900000000068
+      },
+      "loo_predicted_xy_mm": {
+        "x": 419.23752722092377,
+        "y": -132.39499783443026
+      }
+    },
+    {
+      "sample_label": "retrynp14",
+      "marker_id": 13,
+      "features": [
+        -0.002282591413356376,
+        -0.006764051261061736,
+        0.5316976166445142,
+        -0.003183048326835354,
+        -0.8397602212217228
+      ],
+      "base_xy_mm": {
+        "x": 340.0459663725423,
+        "y": -131.91221330437287
+      },
+      "actual_xy_mm": {
+        "x": 340.7265,
+        "y": -132.4113
+      },
+      "residual_xy_mm": {
+        "x": 0.6805336274576916,
+        "y": -0.4990866956271418,
+        "norm": 0.8439274541409015
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 340.72649999999913,
+        "y": -132.41129999999836
+      },
+      "loo_predicted_xy_mm": {
+        "x": 338.1507446670785,
+        "y": -130.55352719621263
+      }
+    },
+    {
+      "sample_label": "retrynp15",
+      "marker_id": 13,
+      "features": [
+        -0.0030368600335640397,
+        -0.11259783163377525,
+        0.5238079786744212,
+        -0.02799608629794619,
+        -0.8162401070001242
+      ],
+      "base_xy_mm": {
+        "x": 240.6931983840279,
+        "y": -132.23063662593682
+      },
+      "actual_xy_mm": {
+        "x": 238.7932,
+        "y": -134.7769
+      },
+      "residual_xy_mm": {
+        "x": -1.8999983840278958,
+        "y": -2.5462633740631873,
+        "norm": 3.1770192050732495
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 238.79320000000084,
+        "y": -134.77689999999788
+      },
+      "loo_predicted_xy_mm": {
+        "x": 240.42919006003575,
+        "y": -132.21788896620257
+      }
+    },
+    {
+      "sample_label": "retrynp16",
+      "marker_id": 13,
+      "features": [
+        0.21600632464203273,
+        0.019554501656338267,
+        0.5365471391091764,
+        0.036018133401442574,
+        -0.7080788294667706
+      ],
+      "base_xy_mm": {
+        "x": 360.4257503242372,
+        "y": 71.15417404339837
+      },
+      "actual_xy_mm": {
+        "x": 362.0486,
+        "y": 68.7
+      },
+      "residual_xy_mm": {
+        "x": 1.6228496757628363,
+        "y": -2.4541740433983676,
+        "norm": 2.942211974928699
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 362.0485999999994,
+        "y": 68.70000000000262
+      },
+      "loo_predicted_xy_mm": {
+        "x": 361.7747226342437,
+        "y": 70.63513538853577
+      }
+    },
+    {
+      "sample_label": "retrynp17",
+      "marker_id": 13,
+      "features": [
+        0.06940348054666867,
+        -0.09009643398074463,
+        0.5193662170005722,
+        -0.03699168449884772,
+        -0.7245339575097305
+      ],
+      "base_xy_mm": {
+        "x": 260.38264449994875,
+        "y": -64.89187097841437
+      },
+      "actual_xy_mm": {
+        "x": 259.5618,
+        "y": -64.6412
+      },
+      "residual_xy_mm": {
+        "x": -0.8208444999487483,
+        "y": 0.2506709784143766,
+        "norm": 0.8582666441819415
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 259.5618000000013,
+        "y": -64.64120000000055
+      },
+      "loo_predicted_xy_mm": {
+        "x": 259.81798515184045,
+        "y": -66.06024664766548
+      }
+    },
+    {
+      "sample_label": "retrynp18",
+      "marker_id": 13,
+      "features": [
+        0.07010565556133454,
+        -0.09184289437571655,
+        0.528062231774956,
+        -0.0729870608274349,
+        -0.6533395829000593
+      ],
+      "base_xy_mm": {
+        "x": 258.72895530115295,
+        "y": -64.23202606076178
+      },
+      "actual_xy_mm": {
+        "x": 259.0618,
+        "y": -64.4743
+      },
+      "residual_xy_mm": {
+        "x": 0.3328446988470546,
+        "y": -0.24227393923821694,
+        "norm": 0.411682225976043
+      },
+      "sample_source": "calibration_capture",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
+      "actual_target_id": null,
+      "actual_target_reason": null,
+      "participant_name": null,
+      "source_event": null,
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 259.0618000000001,
+        "y": -64.47429999999467
+      },
+      "loo_predicted_xy_mm": {
+        "x": 259.10066554072546,
+        "y": -60.7960974573391
+      }
+    },
+    {
+      "sample_label": "log_e36a4391fb3248cf8ca194e37028fca2_cycle0",
+      "marker_id": 11,
+      "features": [
+        0.0662932618248143,
+        0.0642792413481416,
+        0.5391046516066622,
+        -0.09374673177970165,
+        0.6822379052209953
+      ],
+      "base_xy_mm": {
+        "x": 405.3882499230524,
+        "y": -68.3460623277217
+      },
+      "actual_xy_mm": {
+        "x": 404.2777,
+        "y": -67.4403
+      },
+      "residual_xy_mm": {
+        "x": -1.1105499230524174,
+        "y": 0.9057623277217033,
+        "norm": 1.4330828747534348
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P1",
+      "actual_target_reason": "source_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 404.2777,
+        "y": -67.4403
+      },
+      "loo_predicted_xy_mm": {
+        "x": 404.2776999999996,
+        "y": -67.44030000000016
+      }
+    },
+    {
+      "sample_label": "log_e36a4391fb3248cf8ca194e37028fca2_cycle1",
+      "marker_id": 16,
+      "features": [
+        0.06437389906605162,
+        -0.02350514176678458,
+        0.5245870154366757,
+        -0.06092411374588537,
+        -2.4062067456239853
+      ],
+      "base_xy_mm": {
+        "x": 323.00524378638517,
+        "y": -69.81425704396055
+      },
+      "actual_xy_mm": {
+        "x": 322.1818,
+        "y": -67.4403
+      },
+      "residual_xy_mm": {
+        "x": -0.8234437863851554,
+        "y": 2.3739570439605586,
+        "norm": 2.5127140139511055
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P2",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 322.18180000000075,
+        "y": -67.44029999999921
+      },
+      "loo_predicted_xy_mm": {
+        "x": 323.1137734011008,
+        "y": -66.39915359124453
+      }
+    },
+    {
+      "sample_label": "log_e36a4391fb3248cf8ca194e37028fca2_cycle2",
+      "marker_id": 12,
+      "features": [
+        0.18714295265724692,
+        0.06510298243807953,
+        0.551572773124054,
+        -0.19003953194193704,
+        2.228489431219458
+      ],
+      "base_xy_mm": {
+        "x": 403.7640323372516,
+        "y": 44.12591445650165
+      },
+      "actual_xy_mm": {
+        "x": 403.8273,
+        "y": 40.8819
+      },
+      "residual_xy_mm": {
+        "x": 0.06326766274838747,
+        "y": -3.2440144565016453,
+        "norm": 3.2446313490350964
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P5",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 403.82730000000095,
+        "y": 40.881899999999774
+      },
+      "loo_predicted_xy_mm": {
+        "x": 403.7640323372516,
+        "y": 44.12591445650165
+      }
+    },
+    {
+      "sample_label": "log_e36a4391fb3248cf8ca194e37028fca2_cycle3",
+      "marker_id": 13,
+      "features": [
+        0.12086415469527223,
+        -0.07008839475210824,
+        0.5304199589223444,
+        -0.023344135815386097,
+        -0.8067814276547103
+      ],
+      "base_xy_mm": {
+        "x": 278.14729900791156,
+        "y": -17.069871063833574
+      },
+      "actual_xy_mm": {
+        "x": 278.4949,
+        "y": -13.4532
+      },
+      "residual_xy_mm": {
+        "x": 0.34760099208841666,
+        "y": 3.6166710638335733,
+        "norm": 3.633336763041918
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P4",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 278.4949000000001,
+        "y": -13.453200000000761
+      },
+      "loo_predicted_xy_mm": {
+        "x": 278.51781036750737,
+        "y": -15.105048380217966
+      }
+    },
+    {
+      "sample_label": "log_e36a4391fb3248cf8ca194e37028fca2_cycle4",
+      "marker_id": 17,
+      "features": [
+        0.12083798352346128,
+        0.018853332020214678,
+        0.5311744412556503,
+        -0.19011860684477114,
+        -2.4111169887875166
+      ],
+      "base_xy_mm": {
+        "x": 361.6555383998071,
+        "y": -17.416581855905378
+      },
+      "actual_xy_mm": {
+        "x": 362.3367,
+        "y": -13.4532
+      },
+      "residual_xy_mm": {
+        "x": 0.6811616001929224,
+        "y": 3.963381855905377,
+        "norm": 4.02148938346197
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P3",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 362.33669999999927,
+        "y": -13.453200000000788
+      },
+      "loo_predicted_xy_mm": {
+        "x": 362.0291069240529,
+        "y": -16.96890977161399
+      }
+    },
+    {
+      "sample_label": "log_e36a4391fb3248cf8ca194e37028fca2_cycle5",
+      "marker_id": 14,
+      "features": [
+        0.18531409211046268,
+        -0.02680414518303684,
+        0.5473745657114453,
+        0.0310285502633855,
+        0.7410399451824534
+      ],
+      "base_xy_mm": {
+        "x": 317.50837040902934,
+        "y": 42.756892409013574
+      },
+      "actual_xy_mm": {
+        "x": 323.1831,
+        "y": 38.1755
+      },
+      "residual_xy_mm": {
+        "x": 5.674729590970685,
+        "y": -4.581392409013574,
+        "norm": 7.293264861226796
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P6",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 323.18309999999906,
+        "y": 38.17550000000052
+      },
+      "loo_predicted_xy_mm": {
+        "x": 317.50837040902934,
+        "y": 42.756892409013574
+      }
+    },
+    {
+      "sample_label": "log_e36a4391fb3248cf8ca194e37028fca2_cycle6",
+      "marker_id": 15,
+      "features": [
+        0.18260824655601882,
+        -0.11376553156156502,
+        0.540803374382748,
+        -0.11050921814562109,
+        -2.3756210361678005
+      ],
+      "base_xy_mm": {
+        "x": 235.9136826334988,
+        "y": 40.553734342672755
+      },
+      "actual_xy_mm": {
+        "x": 238.8195,
+        "y": 36.9264
+      },
+      "residual_xy_mm": {
+        "x": 2.9058173665011964,
+        "y": -3.6273343426727536,
+        "norm": 4.647722990991731
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P7",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 238.81949999999986,
+        "y": 36.92640000000015
+      },
+      "loo_predicted_xy_mm": {
+        "x": 235.9136826334988,
+        "y": 40.553734342672755
+      }
+    },
+    {
+      "sample_label": "runtime_e36a4391fb3248cf8ca194e37028fca2_P1",
+      "marker_id": 11,
+      "features": [
+        0.0662932618248143,
+        0.0642792413481416,
+        0.5391046516066622,
+        -0.09374673177970165,
+        0.6822379052209953
+      ],
+      "base_xy_mm": {
+        "x": 405.3882499230524,
+        "y": -68.3460623277217
+      },
+      "actual_xy_mm": {
+        "x": 404.2777,
+        "y": -67.4403
+      },
+      "residual_xy_mm": {
+        "x": -1.1105499230524174,
+        "y": 0.9057623277217033,
+        "norm": 1.4330828747534348
+      },
+      "sample_source": "runtime_pick_residual",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/pickup_runtime_residual.jsonl",
+      "actual_target_id": "P1",
+      "actual_target_reason": "runtime_expected_target",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "pickup_runtime_residual",
+      "runtime_tcp_xy_mm": {
+        "x": 405.388,
+        "y": -68.346
+      },
+      "runtime_residual_to_expected_mm": {
+        "x": 1.111,
+        "y": -0.906,
+        "norm": 1.4335818776756353
+      },
+      "train_predicted_xy_mm": {
+        "x": 404.2777,
+        "y": -67.4403
+      },
+      "loo_predicted_xy_mm": {
+        "x": 404.2776999999996,
+        "y": -67.44030000000016
+      }
+    }
+  ]
+}
