@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
+using TMPro;
 using System.Collections;
 
 public class XRUIStateManager : MonoBehaviour
@@ -45,8 +46,16 @@ public class XRUIStateManager : MonoBehaviour
     [Header("Start Countdown")]
     public RobotCommandPipe commandPipe;
     [Min(1)] public int countdownSeconds = 3;
+    [Tooltip("Status/readiness text owner (Waiting/Ready/Run/Game Over).")]
+    public TMP_Text statusLabel;
     [Tooltip("Optional countdown label. If unassigned, countdown runs without text.")]
-    public Text countdownLabel;
+    public TMP_Text countdownLabel;
+    [Tooltip("Optional live elapsed run timer label.")]
+    public TMP_Text timerLabel;
+
+    [Header("Run End Message")]
+    [Tooltip("How long to keep GAME OVER visible before resetting to boot.")]
+    [Min(0f)] public float runEndMessageSeconds = 7f;
 
     [Header("Audio")]
     [Tooltip("Optional music ducking controller. Lowered only after START is acknowledged.")]
@@ -66,11 +75,16 @@ public class XRUIStateManager : MonoBehaviour
     private bool _decisionWindowActive = false;
     private bool hasName = false;
     private bool _boostActive = false;
+    private bool _runTimerActive = false;
+    private float _runTimerStartUnscaled = 0f;
+    private Coroutine _runEndRoutine = null;
 
     void Awake()
     {
         // Boot state on startup
         ApplyState(UIState.Boot);
+        UpdateCountdownLabel("");
+        ResetTimerDisplay();
         UpdateNameReadinessLabel();
     }
 
@@ -79,6 +93,12 @@ public class XRUIStateManager : MonoBehaviour
         if (_waitingForStartAck && Time.unscaledTime >= _startAckDeadline)
         {
             OnStartNack("TIMEOUT");
+        }
+
+        if (_runTimerActive)
+        {
+            float elapsed = Mathf.Max(0f, Time.unscaledTime - _runTimerStartUnscaled);
+            UpdateTimerLabel(FormatElapsedTime(elapsed));
         }
     }
 
@@ -99,6 +119,7 @@ public class XRUIStateManager : MonoBehaviour
         _waitingForStartAck = true;
         _startAckDeadline = Time.unscaledTime + Mathf.Max(0.1f, startAckTimeoutSeconds);
         ApplyState(UIState.Starting);
+        UpdateStatusLabel("Starting...");
 
         if (_startCountdownRoutine != null)
             StopCoroutine(_startCountdownRoutine);
@@ -113,8 +134,10 @@ public class XRUIStateManager : MonoBehaviour
             StopCoroutine(_startCountdownRoutine);
             _startCountdownRoutine = null;
         }
-        SetCountdownText("");
+        UpdateCountdownLabel("");
         _decisionWindowActive = false;
+        UpdateStatusLabel("Run started");
+        StartRunTimer();
         musicDucker?.LowerMusic();
         ApplyState(UIState.Running);
     }
@@ -161,7 +184,7 @@ public class XRUIStateManager : MonoBehaviour
             audioPlayer?.PlayComboBoost();
             musicDucker?.BoostSwell();
         }
-        _boostActive = boostActive;
+        if (boostActive) _boostActive = true;
 
         if (boostUIController == null)
             return;
@@ -186,7 +209,7 @@ public class XRUIStateManager : MonoBehaviour
         _boostActive = false;
         audioPlayer?.PlayRunSuccess();
         musicDucker?.RestoreMusic();
-        ResetToBoot();
+        BeginRunEndFlow();
     }
 
     public void OnRunTumble()
@@ -194,11 +217,21 @@ public class XRUIStateManager : MonoBehaviour
         _boostActive = false;
         audioPlayer?.PlayTumble();
         musicDucker?.RestoreMusic();
-        ResetToBoot();
+        BeginRunEndFlow();
+    }
+
+    public void OnGameplayComplete()
+    {
+        StopRunTimer();
     }
 
     public void ResetToBoot()
     {
+        if (_runEndRoutine != null)
+        {
+            StopCoroutine(_runEndRoutine);
+            _runEndRoutine = null;
+        }
         hasName = false;
         _boostActive = false;
         _waitingForStartAck = false;
@@ -206,12 +239,14 @@ public class XRUIStateManager : MonoBehaviour
         _fixPendingStartTime = 0f;
         _decisionWindowActive = false;
         _startAckDeadline = 0f;
+        StopRunTimer();
+        ResetTimerDisplay();
         if (_startCountdownRoutine != null)
         {
             StopCoroutine(_startCountdownRoutine);
             _startCountdownRoutine = null;
         }
-        SetCountdownText("");
+        UpdateCountdownLabel("");
         ApplyState(UIState.Boot);
         UpdateNameReadinessLabel();
     }
@@ -340,11 +375,11 @@ public class XRUIStateManager : MonoBehaviour
             if (!_waitingForStartAck)
                 yield break;
 
-            SetCountdownText(value.ToString());
+            UpdateCountdownLabel(value.ToString());
             yield return new WaitForSecondsRealtime(1f);
         }
 
-        SetCountdownText("");
+        UpdateCountdownLabel("");
 
         if (!_waitingForStartAck)
             yield break;
@@ -357,6 +392,27 @@ public class XRUIStateManager : MonoBehaviour
 
         commandPipe.SendStart();
         _startCountdownRoutine = null;
+    }
+
+    private void BeginRunEndFlow()
+    {
+        StopRunTimer();
+        UpdateStatusLabel("GAME OVER");
+
+        if (_runEndRoutine != null)
+            StopCoroutine(_runEndRoutine);
+
+        _runEndRoutine = StartCoroutine(ShowRunEndThenReset());
+    }
+
+    private IEnumerator ShowRunEndThenReset()
+    {
+        float delay = Mathf.Max(0f, runEndMessageSeconds);
+        if (delay > 0f)
+            yield return new WaitForSecondsRealtime(delay);
+
+        _runEndRoutine = null;
+        ResetToBoot();
     }
 
     // ----- Core state application -----
@@ -476,17 +532,54 @@ public class XRUIStateManager : MonoBehaviour
         SetInteractableSafe(Button_NudgeBackward, nudgeEnabled);
     }
 
-    private void SetCountdownText(string text)
+    private void UpdateStatusLabel(string text)
+    {
+        if (statusLabel == null)
+            return;
+        statusLabel.text = text ?? "";
+    }
+
+    private void UpdateCountdownLabel(string text)
     {
         if (countdownLabel == null)
             return;
         countdownLabel.text = text ?? "";
     }
 
+    private void UpdateTimerLabel(string text)
+    {
+        if (timerLabel == null)
+            return;
+        timerLabel.text = text ?? "";
+    }
+
+    private void StartRunTimer()
+    {
+        _runTimerStartUnscaled = Time.unscaledTime;
+        _runTimerActive = true;
+        UpdateTimerLabel("00:00");
+    }
+
+    private void StopRunTimer()
+    {
+        _runTimerActive = false;
+    }
+
+    private void ResetTimerDisplay()
+    {
+        UpdateTimerLabel("00:00");
+    }
+
+    private static string FormatElapsedTime(float elapsedSeconds)
+    {
+        int totalSeconds = Mathf.FloorToInt(Mathf.Max(0f, elapsedSeconds));
+        int minutes = totalSeconds / 60;
+        int seconds = totalSeconds % 60;
+        return string.Format("{0:00}:{1:00}", minutes, seconds);
+    }
+
     private void UpdateNameReadinessLabel()
     {
-        if (countdownLabel == null)
-            return;
-        countdownLabel.text = hasName ? "Ready" : "Waiting for player name...";
+        UpdateStatusLabel(hasName ? "Ready" : "Waiting for player name...");
     }
 }

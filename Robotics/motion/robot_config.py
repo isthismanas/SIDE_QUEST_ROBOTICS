@@ -151,6 +151,10 @@ PICK_CLEARANCE_MM = 40.0      # height above block before/after pick
 PLACE_CLEARANCE_MM = 40.0     # height above tower during approach
 BLOCK_HEIGHT_MM = 37.0        # physical block height
 
+# Softening lift applied to explicit build-point final placement Z.
+# Positive values reduce downward compression on contact.
+PLACE_Z_SOFTEN_MM = 3
+
 # Layout switches (legacy fallback preserved)
 # PICK_LAYOUT_MODE: "legacy_towers" | "pickup_plate"
 # BUILD_LAYOUT_MODE: "tower_stack" | "explicit_points"
@@ -337,7 +341,8 @@ def build_target_pose(target_id: str):
     if _is_explicit_build_layout():
         if tid not in BUILD_POINTS:
             raise ValueError(f"Unknown build target id: {target_id}")
-        return BUILD_POINTS[tid]
+        x, y, z, rx, ry, rz = BUILD_POINTS[tid]
+        return (x, y, z + PLACE_Z_SOFTEN_MM, rx, ry, rz)
     if tid.startswith("T") and tid[1:].isdigit():
         level = int(tid[1:]) - 1
         x, y, z0, rx, ry, rz = TOWER_BASE_POSE

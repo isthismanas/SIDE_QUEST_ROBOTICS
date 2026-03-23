@@ -1,10 +1,11 @@
-Robotics Technical Brief (v8)
+Robotics Technical Brief (v9)
 
 Project: Side Quest: The Leaning Tower of Regolith (ARC 2026 Target)
 Sub-Team: Robotics
-Last Updated: 26 Feb 2026 (Dev 12 – Tolerance Engine + Combo Flow B + Run Completion Stable)
+Last Updated: 21 Mar 2026 (Dev 13 – Placement Softening)
 
 Dev 24 Note (UI-side): No functional robotics pipeline changes; only XR operator UI interaction-layer updates.
+
 
 ================================================================
 
@@ -477,8 +478,6 @@ Next Phase:
 
 10. Software Layer Separation
 
-10. Software Layer Separation
-
 task_controller.py        – TCP + orchestration
 state_machine.py          – transition rules + gating
 actions.py                – robot + gripper side-effects
@@ -493,3 +492,5 @@ vision_engine.py          – camera-based pose estimation
 experiment_logger.py      – structured CSV run logging
 
 ================================================================
+
+Dev Note: Added `PLACE_Z_SOFTEN_MM` (default +1.5 mm) in `robot_config.py`. Applied only in explicit build-point mode inside `build_target_pose()`. Raises the final place Z by this offset to reduce downward compression on contact. Hover Z remains derived from the adjusted place pose (+40 mm clearance), so approach geometry is self-consistent.
