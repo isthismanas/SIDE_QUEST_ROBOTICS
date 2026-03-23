@@ -1,4 +1,4 @@
-import time, socket, struct, os, threading, json, sys
+import time, socket, struct, os, threading, json, sys, subprocess
 import warnings
 import secrets
 from datetime import timedelta
@@ -10,6 +10,7 @@ from leaderboard import normalize_leaderboard_mode
 
 import actions
 from actions import SystemHandles
+import block_tracker
 import drift_engine
 import tolerance_engine
 import vision_controller
@@ -119,7 +120,9 @@ run_finalized = False
 _logged_raw_getpose_probe = False
 current_run_seed = None
 active_pick_target_id = None
+active_pick_claim_target_id = None
 placed_pick_target_ids: list[str] = []
+expected_workbench_brick_count = None
 committed_stack_level = 0
 pending_commit_level = None
 pending_commit_deadline = None
@@ -139,6 +142,16 @@ LEADERBOARD_MODE = "DEV"
 OFFICIAL_EVENT_ID = "ARC2026"
 
 LEADERBOARD_PORT = 8090
+VISION_ASSIST_STATE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "perception",
+    "logs",
+    "vision_pick_assist_state.json",
+)
+REPO_ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+TRAIN_PICK_ML_SCRIPT_PATH = os.path.join(REPO_ROOT_DIR, "Robotics", "perception", "train_pick_ml_residual.py")
+_TERMINAL_INPUT_LOCK = threading.Lock()
 
 # Shared mutable context read by the leaderboard HTTP handler at request time.
 # Kept in sync with LEADERBOARD_MODE / OFFICIAL_EVENT_ID whenever they change.
@@ -259,9 +272,207 @@ def _current_pick_target_id() -> str | None:
 
 
 def _reset_pick_runtime_cache() -> None:
-    global active_pick_target_id, placed_pick_target_ids
+    global active_pick_target_id, active_pick_claim_target_id, placed_pick_target_ids, expected_workbench_brick_count
     active_pick_target_id = None
+    active_pick_claim_target_id = None
     placed_pick_target_ids = []
+
+
+def _write_vision_assist_state() -> None:
+    payload = {
+        "participant_name": participant_name,
+        "session_id": session_id,
+        "run_id": run_id,
+        "pick_mode": str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower(),
+        "expected_workbench_brick_count": expected_workbench_brick_count,
+        "placed_pick_target_ids": list(placed_pick_target_ids),
+        "active_pick_target_id": active_pick_target_id,
+        "active_pick_claim_target_id": active_pick_claim_target_id,
+        "current_stack_level": int(current_stack_level) if isinstance(current_stack_level, int) else current_stack_level,
+        "current_pick_index": int(current_pick_index) if isinstance(current_pick_index, int) else current_pick_index,
+        "remaining_targets": _remaining_pick_targets(),
+        "ts_unix": time.time(),
+    }
+    os.makedirs(os.path.dirname(VISION_ASSIST_STATE_PATH), exist_ok=True)
+    with open(VISION_ASSIST_STATE_PATH, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+
+
+def _nearest_pick_slot_claim(target_id: str) -> str:
+    tracking = block_tracker.track_pick_target(str(target_id))
+    if tracking.get("available", False):
+        robot_x, robot_y = tracking["robot_xy"]
+        best_target_id = None
+        best_norm = None
+        for candidate_id, candidate_pose in getattr(cfg, "PICKUP_POINTS", {}).items():
+            dx = float(robot_x) - float(candidate_pose[0])
+            dy = float(robot_y) - float(candidate_pose[1])
+            norm = (dx * dx + dy * dy) ** 0.5
+            if best_norm is None or norm < best_norm:
+                best_target_id = str(candidate_id)
+                best_norm = norm
+        claim_radius_mm = float(getattr(cfg, "VISION_PICK_SLOT_CLAIM_RADIUS_MM", 70.0))
+        if best_target_id is not None and best_norm is not None and best_norm <= claim_radius_mm:
+            return best_target_id
+    return str(target_id)
+
+
+def _prompt_workbench_brick_count() -> int | None:
+    pick_mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+    if pick_mode != "vision":
+        return None
+
+    target_height = int(getattr(cfg, "TOWER_LEVELS", 7))
+    prompt = f"How many bricks are on the workbench? [1-{target_height}] "
+    with _TERMINAL_INPUT_LOCK:
+        while True:
+            try:
+                raw = input(prompt).strip()
+            except EOFError:
+                return None
+            if not raw:
+                continue
+            try:
+                value = int(raw)
+            except ValueError:
+                print(f"[VISION] Enter an integer between 1 and {target_height}.")
+                continue
+            if 1 <= value <= target_height:
+                return value
+            print(f"[VISION] Enter an integer between 1 and {target_height}.")
+
+
+def _effective_target_stack_count() -> int:
+    configured = int(cfg.stack_target_count())
+    if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower() == "vision":
+        if expected_workbench_brick_count is not None:
+            return max(0, min(configured, int(expected_workbench_brick_count)))
+    return configured
+
+
+def _retrain_pick_ml_before_run() -> bool:
+    pick_mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+    if pick_mode != "vision":
+        return True
+    if not bool(getattr(cfg, "VISION_PICK_ML_ENABLED", False)):
+        console_info("VISION", "[VISION] Pickup ML disabled in config; skipping retraining.", essential=True)
+        return True
+    if not os.path.exists(TRAIN_PICK_ML_SCRIPT_PATH):
+        warn("VISION", f"[VISION] Pickup ML trainer missing: {TRAIN_PICK_ML_SCRIPT_PATH}")
+        return False
+
+    output_json = str(getattr(cfg, "VISION_PICK_ML_MODEL_JSON", "")).strip()
+    if not output_json:
+        warn("VISION", "[VISION] Pickup ML model path is unset; cannot retrain.")
+        return False
+    if not os.path.isabs(output_json):
+        output_json = os.path.abspath(os.path.join(REPO_ROOT_DIR, output_json))
+
+    cmd = [
+        sys.executable,
+        TRAIN_PICK_ML_SCRIPT_PATH,
+        "--output-json",
+        output_json,
+        "--use-log-confirmation-samples",
+        "--use-runtime-residual-samples",
+    ]
+    console_info("VISION", "[VISION] Retraining pickup ML from previous logs before run start...", essential=True)
+    started_at = time.monotonic()
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=REPO_ROOT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=120.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        warn("VISION", "[VISION] Pickup ML retraining timed out after 120s. Continuing with the existing model.")
+        write_jsonl_event(
+            "motion_trace",
+            {
+                "event": "pick_ml_retrain_timeout",
+                "module": "VISION",
+                "pick_mode": pick_mode,
+                "output_json": output_json,
+            },
+        )
+        return False
+    except Exception as exc:
+        warn("VISION", f"[VISION] Pickup ML retraining failed: {exc}. Continuing with the existing model.")
+        write_jsonl_event(
+            "motion_trace",
+            {
+                "event": "pick_ml_retrain_error",
+                "module": "VISION",
+                "pick_mode": pick_mode,
+                "output_json": output_json,
+                "error": str(exc),
+            },
+        )
+        return False
+
+    duration_s = time.monotonic() - started_at
+    stdout_lines = [line.strip() for line in str(result.stdout or "").splitlines() if line.strip()]
+    stderr_lines = [line.strip() for line in str(result.stderr or "").splitlines() if line.strip()]
+    metrics: dict[str, str] = {}
+    for line in stdout_lines:
+        if line.startswith("[PICK_ML] ") and "=" in line:
+            key, value = line[len("[PICK_ML] ") :].split("=", 1)
+            metrics[key.strip()] = value.strip()
+
+    if result.returncode != 0:
+        warn(
+            "VISION",
+            f"[VISION] Pickup ML retraining exited with code {result.returncode}. Continuing with the existing model.",
+        )
+        for line in stdout_lines[-6:]:
+            console_info("VISION", line, essential=True)
+        for line in stderr_lines[-6:]:
+            warn("VISION", line)
+        write_jsonl_event(
+            "motion_trace",
+            {
+                "event": "pick_ml_retrain_failed",
+                "module": "VISION",
+                "pick_mode": pick_mode,
+                "output_json": output_json,
+                "returncode": int(result.returncode),
+                "duration_s": duration_s,
+                "stdout_tail": stdout_lines[-6:],
+                "stderr_tail": stderr_lines[-6:],
+            },
+        )
+        return False
+
+    summary = (
+        "[VISION] Pickup ML retrain complete: "
+        f"samples={metrics.get('sample_count', '?')} "
+        f"runtime={metrics.get('runtime_residual_sample_count', '?')} "
+        f"loo_rmse_total_mm={metrics.get('loo_rmse_total_mm', '?')} "
+        f"duration_s={duration_s:.1f}"
+    )
+    console_info("VISION", summary, essential=True)
+    write_jsonl_event(
+        "motion_trace",
+        {
+            "event": "pick_ml_retrain_complete",
+            "module": "VISION",
+            "pick_mode": pick_mode,
+            "output_json": output_json,
+            "duration_s": duration_s,
+            "returncode": int(result.returncode),
+            "sample_count": metrics.get("sample_count"),
+            "calibration_sample_count": metrics.get("calibration_sample_count"),
+            "log_confirmation_sample_count": metrics.get("log_confirmation_sample_count"),
+            "runtime_residual_sample_count": metrics.get("runtime_residual_sample_count"),
+            "base_rmse_total_mm": metrics.get("base_rmse_total_mm"),
+            "train_rmse_total_mm": metrics.get("train_rmse_total_mm"),
+            "loo_rmse_total_mm": metrics.get("loo_rmse_total_mm"),
+        },
+    )
+    return True
 
 
 def _remaining_pick_targets() -> list[str]:
@@ -915,7 +1126,7 @@ def handle_command(cmd_str: str, source: str) -> None:
     global proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active
     global run_id, run_finalized, current_run_seed, DEBUG_ENABLED, _last_ready_level_printed
-    global active_pick_target_id, placed_pick_target_ids
+    global active_pick_target_id, active_pick_claim_target_id, placed_pick_target_ids, expected_workbench_brick_count
     global LEADERBOARD_MODE, OFFICIAL_EVENT_ID
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
     global last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
@@ -943,6 +1154,8 @@ def handle_command(cmd_str: str, source: str) -> None:
         current_stack_level = 0
         current_pick_index = 0
         _reset_pick_runtime_cache()
+        expected_workbench_brick_count = _prompt_workbench_brick_count()
+        target_stack_count = _effective_target_stack_count()
         session_id = f"{int(time.time())}-{uuid4().hex[:8]}"
         tower_attempt_start_ts = None
         run_start_time = None
@@ -970,9 +1183,24 @@ def handle_command(cmd_str: str, source: str) -> None:
         _clear_score_commit_state()
         _reset_drift_scale_for_run("NAME")
         vision_controller.reset_pick_tracking_memory()
+        _write_vision_assist_state()
         _sync_json_log_context()
         _send_line_to_unity("NAME_SET")
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
+        if expected_workbench_brick_count is not None:
+            retrain_ok = _retrain_pick_ml_before_run()
+            console_info(
+                "CONTROL",
+                f"Workbench brick count set to {expected_workbench_brick_count}. Starting run.",
+                essential=True,
+            )
+            if not retrain_ok:
+                warn(
+                    "VISION",
+                    "[VISION] Pickup ML retraining did not complete cleanly. Starting anyway with the existing model.",
+                )
+            handle_command("START", source)
+            return
         console_info("CONTROL", f"Participant set: {participant_name}. Ready to START.", essential=True)
         return
 
@@ -1306,7 +1534,12 @@ def handle_command(cmd_str: str, source: str) -> None:
 
     def _handle_vision_pick_unavailable(reason: str) -> None:
         global STATE
-        warn(module, f"[VISION] pick pose unavailable: {reason}")
+        warn(module, f"[VISION] pick unavailable: {reason}")
+        warn(
+            module,
+            "[VISION] Unable to continue vision pickup. Switch to deterministic mode for remaining hardcoded P-slots. "
+            "Use Robotics/perception/deterministic_remaining_pick_place.py to inspect or execute the remaining unvisited pickup points.",
+        )
         _send_line_to_unity("VISION_STATUS FAIL")
         STATE = State.WAITING_FOR_REPOSITION
         info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
@@ -1423,11 +1656,13 @@ def handle_command(cmd_str: str, source: str) -> None:
                 pick_target_id = _resolve_pick_target_for_cycle()
             except RuntimeError as e:
                 active_pick_target_id = None
+                active_pick_claim_target_id = None
                 if VISION_MODE_ENABLED:
                     _handle_vision_pick_unavailable(str(e))
                     return
                 raise
             active_pick_target_id = pick_target_id
+            active_pick_claim_target_id = _nearest_pick_slot_claim(pick_target_id)
             handles.combo_active = combo_active
             vision_controller.log_pick_tracking(
                 target_id=pick_target_id,
@@ -1438,6 +1673,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
             except actions.PickPoseUnavailableError as e:
                 active_pick_target_id = None
+                active_pick_claim_target_id = None
                 if VISION_MODE_ENABLED:
                     _handle_vision_pick_unavailable(e.reason)
                     return
@@ -1871,9 +2107,27 @@ def handle_command(cmd_str: str, source: str) -> None:
 
             # Update stack counters only on success
             if isinstance(placed_target_id, str) and placed_target_id.strip():
-                if placed_target_id not in placed_pick_target_ids:
-                    placed_pick_target_ids.append(placed_target_id)
+                claimed_target_id = (
+                    str(active_pick_claim_target_id)
+                    if isinstance(active_pick_claim_target_id, str) and active_pick_claim_target_id.strip()
+                    else _nearest_pick_slot_claim(placed_target_id)
+                )
+                if claimed_target_id not in placed_pick_target_ids:
+                    placed_pick_target_ids.append(claimed_target_id)
+                write_jsonl_event(
+                    "block_state",
+                    {
+                        "event": "pick_slot_claimed",
+                        "module": "CONTROL",
+                        "selected_target_id": str(placed_target_id),
+                        "claimed_target_id": str(claimed_target_id),
+                        "claim_radius_mm": float(getattr(cfg, "VISION_PICK_SLOT_CLAIM_RADIUS_MM", 70.0)),
+                        "placed_pick_target_ids": list(placed_pick_target_ids),
+                    },
+                )
+                _write_vision_assist_state()
             active_pick_target_id = None
+            active_pick_claim_target_id = None
             current_stack_level += 1
             current_pick_index += 1
             _set_pending_commit(current_stack_level, time.monotonic() + 5.0)
@@ -1938,6 +2192,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                             pick_target_id = _resolve_pick_target_for_cycle()
                         except RuntimeError as e:
                             active_pick_target_id = None
+                            active_pick_claim_target_id = None
                             if VISION_MODE_ENABLED:
                                 warn(module, f"[VISION] pick target unavailable: {e}")
                                 _send_line_to_unity("VISION_STATUS FAIL")
@@ -1946,6 +2201,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                                 return
                             raise
                         active_pick_target_id = pick_target_id
+                        active_pick_claim_target_id = _nearest_pick_slot_claim(pick_target_id)
                         handles.combo_active = combo_active
                         vision_controller.log_pick_tracking(
                             target_id=pick_target_id,
@@ -1956,6 +2212,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                             actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
                         except actions.PickPoseUnavailableError as e:
                             active_pick_target_id = None
+                            active_pick_claim_target_id = None
                             if VISION_MODE_ENABLED:
                                 warn(module, f"[VISION] pick pose unavailable: {e.reason}")
                                 _send_line_to_unity("VISION_STATUS FAIL")
@@ -2309,10 +2566,11 @@ def facilitator_hotkey_loop():
         info("CONTROL", "[FACILITATOR] Console ready: t|tumble, r|recover, n <name>|name <name>, h|help")
     while not STOP_EVENT.is_set():
         try:
-            if _is_debug_enabled():
-                raw = input("FACILITATOR> ")
-            else:
-                raw = input()
+            with _TERMINAL_INPUT_LOCK:
+                if _is_debug_enabled():
+                    raw = input("FACILITATOR> ")
+                else:
+                    raw = input()
             line = raw.strip()
             if not line:
                 continue

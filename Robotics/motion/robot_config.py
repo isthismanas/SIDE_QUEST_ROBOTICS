@@ -110,6 +110,7 @@ VISION_MARKER_CHANGE_LOG_ROTATION = False  # rotation flips alone do not count a
 VISION_PICK_OBJECT_PERMANENCE_ENABLED = True  # keep last-seen pickup marker positions until that block is picked
 VISION_PICK_OBJECT_PERMANENCE_MAX_AGE_S = 2.0  # only trust remembered pickup markers for a very short time after last sighting
 VISION_DYNAMIC_PICK_SELECTION_ENABLED = True  # when controller-side vision pickup is authoritative, choose the next source block from marker observations
+VISION_PICK_SLOT_CLAIM_RADIUS_MM = 70.0  # nearest deterministic pickup slot radius used to claim a visited P-slot after a vision-assisted pick
 VISION_PICK_TEMPLATE_TARGET = "P3"  # provides fixed Z/orientation for single-shot perception picks
 VISION_PICK_WORKSPACE_X_MM = (210.0, 430.0)  # bounded XY workspace for arbitrary-on-plane perception picks
 VISION_PICK_WORKSPACE_Y_MM = (-80.0, 60.0)
@@ -119,13 +120,13 @@ VISION_PICK_WORKSPACE_Y_MM = (-80.0, 60.0)
 # - affects pickup estimation only
 # - does not change deterministic controller motion
 # - falls back to the base calibrated affine map when unavailable
-VISION_PICK_ML_ENABLED = False
+VISION_PICK_ML_ENABLED = True
 VISION_PICK_ML_MODEL_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",
     "perception",
     "calibration_data",
-    "pick_plane_marker13_20260318_ml_residual.json",
+    "pick_plane_marker13_20260321_retry_ml_residual_runtime.json",
 )
 VISION_PICK_X_OFFSET_MM = 0.0
 VISION_PICK_Y_OFFSET_MM = 0.0
