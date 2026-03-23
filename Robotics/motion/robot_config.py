@@ -416,7 +416,7 @@ DRIFT_MAX_XY_MM = 5.0
 # 0.0 = no drift
 # 1.0 = baseline
 # 2.0 = double drift
-DRIFT_SCALE = 0
+DRIFT_SCALE = 1.35
 DRIFT_SCALE_DEFAULT = DRIFT_SCALE
 
 # Distribution mode
