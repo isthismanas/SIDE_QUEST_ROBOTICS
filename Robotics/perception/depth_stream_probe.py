@@ -54,6 +54,8 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 STREAM_WIDTH = 1280
 STREAM_HEIGHT = 720
+STALL_AGE_RATIO = 0.25
+STALL_SPAN_RATIO = 0.5
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,8 +77,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--duration-s",
         type=float,
+        default=20.0,
+        help="How long to measure each device after warmup.",
+    )
+    parser.add_argument(
+        "--warmup-s",
+        type=float,
         default=5.0,
-        help="How long to sample each device for depth frames.",
+        help="Initial camera wake-up window excluded from measured results.",
     )
     parser.add_argument(
         "--min-valid-depth-mm",
@@ -200,6 +208,46 @@ def _role_conflict(details: dict[str, tuple[str, ...]]) -> bool:
     return len(_configured_roles(details)) > 1
 
 
+def _active_fps(frame_count: int, stream_span_s: float | None) -> float | None:
+    if stream_span_s is None or stream_span_s <= 0.0 or frame_count <= 1:
+        return None
+    return float(frame_count / stream_span_s)
+
+
+def _stall_assessment(
+    frame_count: int,
+    elapsed_s: float,
+    stream_span_s: float | None,
+    last_age_s: float | None,
+) -> dict[str, Any]:
+    if frame_count <= 0:
+        return {
+            "stalled": False,
+            "reason": "no_frames",
+        }
+
+    span_ratio = None if stream_span_s is None or elapsed_s <= 0.0 else float(stream_span_s / elapsed_s)
+    age_ratio = None if last_age_s is None or elapsed_s <= 0.0 else float(last_age_s / elapsed_s)
+    stalled = bool(
+        frame_count > 0
+        and stream_span_s is not None
+        and last_age_s is not None
+        and elapsed_s > 0.0
+        and span_ratio is not None
+        and age_ratio is not None
+        and span_ratio < STALL_SPAN_RATIO
+        and age_ratio > STALL_AGE_RATIO
+    )
+    return {
+        "stalled": stalled,
+        "reason": (
+            "burst_then_stall" if stalled else "continuous_or_insufficient_evidence"
+        ),
+        "span_ratio": span_ratio,
+        "age_ratio": age_ratio,
+    }
+
+
 def _resolve_target_devices(
     requested_id: str,
     available: list[tuple[dai.DeviceInfo, str, tuple[str, ...]]],
@@ -267,11 +315,12 @@ def _build_depth_probe_v2_pipeline(fps: float) -> dai.Pipeline:
 def _probe_device_v2(
     device_info: dai.DeviceInfo,
     fps: float,
+    warmup_s: float,
     duration_s: float,
     min_valid_depth_mm: float,
     max_valid_depth_mm: float,
 ) -> dict[str, Any]:
-    started_at = time.monotonic()
+    probe_started_at = time.monotonic()
     raw_frames = 0
     depth_frames = 0
     valid_ratios: list[float] = []
@@ -293,45 +342,49 @@ def _probe_device_v2(
 
         raw_queue = device.getOutputQueue("rawL", maxSize=4, blocking=False)
         depth_queue = device.getOutputQueue("depth", maxSize=4, blocking=False)
+        warmup_deadline = probe_started_at + max(0.0, float(warmup_s))
+        measurement_deadline = warmup_deadline + max(0.0, float(duration_s))
 
-        while (time.monotonic() - started_at) < duration_s:
+        while time.monotonic() < measurement_deadline:
             did_work = False
 
             raw_packet = raw_queue.tryGet()
             while raw_packet is not None:
                 raw_frame = raw_packet.getCvFrame()
-                raw_frames += 1
-                raw_shape = tuple(int(v) for v in raw_frame.shape)
                 now = time.monotonic()
-                if first_raw_ts is None:
-                    first_raw_ts = now
-                last_raw_ts = now
+                if now >= warmup_deadline:
+                    raw_frames += 1
+                    raw_shape = tuple(int(v) for v in raw_frame.shape)
+                    if first_raw_ts is None:
+                        first_raw_ts = now
+                    last_raw_ts = now
                 did_work = True
                 raw_packet = raw_queue.tryGet()
 
             depth_packet = depth_queue.tryGet()
             while depth_packet is not None:
                 depth_frame = depth_packet.getFrame()
-                depth_frames += 1
-                depth_shape = tuple(int(v) for v in depth_frame.shape)
-                depth_dtype = str(depth_frame.dtype)
                 now = time.monotonic()
-                if first_depth_ts is None:
-                    first_depth_ts = now
-                last_depth_ts = now
+                if now >= warmup_deadline:
+                    depth_frames += 1
+                    depth_shape = tuple(int(v) for v in depth_frame.shape)
+                    depth_dtype = str(depth_frame.dtype)
+                    if first_depth_ts is None:
+                        first_depth_ts = now
+                    last_depth_ts = now
 
-                valid_mask = (
-                    np.isfinite(depth_frame)
-                    & (depth_frame >= float(min_valid_depth_mm))
-                    & (depth_frame <= float(max_valid_depth_mm))
-                )
-                valid_count = int(np.count_nonzero(valid_mask))
-                total_count = int(depth_frame.size)
-                valid_ratio = 0.0 if total_count <= 0 else (valid_count / float(total_count))
-                valid_ratios.append(valid_ratio)
-                if valid_count > 0:
-                    valid_values = depth_frame[valid_mask]
-                    valid_median_depths_mm.append(float(np.median(valid_values)))
+                    valid_mask = (
+                        np.isfinite(depth_frame)
+                        & (depth_frame >= float(min_valid_depth_mm))
+                        & (depth_frame <= float(max_valid_depth_mm))
+                    )
+                    valid_count = int(np.count_nonzero(valid_mask))
+                    total_count = int(depth_frame.size)
+                    valid_ratio = 0.0 if total_count <= 0 else (valid_count / float(total_count))
+                    valid_ratios.append(valid_ratio)
+                    if valid_count > 0:
+                        valid_values = depth_frame[valid_mask]
+                        valid_median_depths_mm.append(float(np.median(valid_values)))
 
                 did_work = True
                 depth_packet = depth_queue.tryGet()
@@ -339,17 +392,33 @@ def _probe_device_v2(
             if not did_work:
                 time.sleep(0.01)
 
-    elapsed_s = max(0.0, time.monotonic() - started_at)
+    finished_at = time.monotonic()
+    probe_elapsed_s = max(0.0, finished_at - probe_started_at)
+    elapsed_s = min(
+        max(0.0, finished_at - warmup_deadline),
+        max(0.0, float(duration_s)),
+    )
     raw_stream_span_s = None if first_raw_ts is None or last_raw_ts is None else max(0.0, last_raw_ts - first_raw_ts)
     depth_stream_span_s = None if first_depth_ts is None or last_depth_ts is None else max(0.0, last_depth_ts - first_depth_ts)
+    last_raw_age_s = None if last_raw_ts is None else max(0.0, finished_at - last_raw_ts)
+    last_depth_age_s = None if last_depth_ts is None else max(0.0, finished_at - last_depth_ts)
+    raw_active_fps = _active_fps(raw_frames, raw_stream_span_s)
+    depth_active_fps = _active_fps(depth_frames, depth_stream_span_s)
+    raw_stall = _stall_assessment(raw_frames, elapsed_s, raw_stream_span_s, last_raw_age_s)
+    depth_stall = _stall_assessment(depth_frames, elapsed_s, depth_stream_span_s, last_depth_age_s)
 
     return {
         "api_path": "v2_xlink",
+        "warmup_s": float(max(0.0, warmup_s)),
+        "measurement_duration_s": float(max(0.0, duration_s)),
+        "probe_total_elapsed_s": float(probe_elapsed_s),
         "probe_elapsed_s": float(elapsed_s),
         "raw_frames": int(raw_frames),
         "depth_frames": int(depth_frames),
         "raw_observed_fps": (float(raw_frames / elapsed_s) if elapsed_s > 0.0 else 0.0),
         "depth_observed_fps": (float(depth_frames / elapsed_s) if elapsed_s > 0.0 else 0.0),
+        "raw_active_fps": raw_active_fps,
+        "depth_active_fps": depth_active_fps,
         "raw_stream_span_s": raw_stream_span_s,
         "depth_stream_span_s": depth_stream_span_s,
         "raw_shape": raw_shape,
@@ -362,15 +431,17 @@ def _probe_device_v2(
         "median_valid_depth_mm": (
             float(np.median(valid_median_depths_mm)) if valid_median_depths_mm else None
         ),
-        "last_depth_age_s": (
-            None if last_depth_ts is None else max(0.0, time.monotonic() - float(last_depth_ts))
-        ),
+        "last_raw_age_s": last_raw_age_s,
+        "last_depth_age_s": last_depth_age_s,
+        "raw_stall_assessment": raw_stall,
+        "depth_stall_assessment": depth_stall,
     }
 
 
 def _probe_device(
     device_info: dai.DeviceInfo,
     fps: float,
+    warmup_s: float,
     duration_s: float,
     min_valid_depth_mm: float,
     max_valid_depth_mm: float,
@@ -379,6 +450,7 @@ def _probe_device(
         return _probe_device_v2(
             device_info=device_info,
             fps=fps,
+            warmup_s=warmup_s,
             duration_s=duration_s,
             min_valid_depth_mm=min_valid_depth_mm,
             max_valid_depth_mm=max_valid_depth_mm,
@@ -454,6 +526,11 @@ def _print_available_devices(devices: list[tuple[dai.DeviceInfo, str, tuple[str,
             "[DEPTH_PROBE] "
             f"role_match_details={role_details} role_conflict={_role_conflict(role_details)}"
         )
+        if _role_conflict(role_details):
+            print(
+                "[DEPTH_PROBE] "
+                "diagnostic=config role conflict detected; MXID/IP identifiers for this physical device map to different roles"
+            )
 
 
 def _run_probe(args: argparse.Namespace) -> int:
@@ -474,7 +551,7 @@ def _run_probe(args: argparse.Namespace) -> int:
     print(
         "[DEPTH_PROBE] "
         f"probing api_path={'v2_xlink' if _supports_v2_xlink() else 'v3_camera_api' if _supports_v3_camera_api() else 'unknown'} "
-        f"duration_s={float(args.duration_s):.1f} fps={float(args.fps):.1f}"
+        f"warmup_s={float(args.warmup_s):.1f} duration_s={float(args.duration_s):.1f} fps={float(args.fps):.1f}"
     )
 
     failure_count = 0
@@ -492,17 +569,23 @@ def _run_probe(args: argparse.Namespace) -> int:
             summary = _probe_device(
                 device_info=device_info,
                 fps=float(args.fps),
+                warmup_s=float(args.warmup_s),
                 duration_s=float(args.duration_s),
                 min_valid_depth_mm=float(args.min_valid_depth_mm),
                 max_valid_depth_mm=float(args.max_valid_depth_mm),
             )
             for key in (
                 "api_path",
+                "warmup_s",
+                "measurement_duration_s",
+                "probe_total_elapsed_s",
                 "probe_elapsed_s",
                 "raw_frames",
                 "depth_frames",
                 "raw_observed_fps",
                 "depth_observed_fps",
+                "raw_active_fps",
+                "depth_active_fps",
                 "raw_stream_span_s",
                 "depth_stream_span_s",
                 "raw_shape",
@@ -513,7 +596,10 @@ def _run_probe(args: argparse.Namespace) -> int:
                 "mean_valid_ratio",
                 "max_valid_ratio",
                 "median_valid_depth_mm",
+                "last_raw_age_s",
                 "last_depth_age_s",
+                "raw_stall_assessment",
+                "depth_stall_assessment",
                 "note",
             ):
                 if key in summary:
