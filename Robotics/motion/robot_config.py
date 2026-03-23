@@ -56,11 +56,11 @@ SOCKET_TIMEOUT_S = 5.0
 # Camera identifiers. Preserve legacy MXIDs but allow current PoE device ids.
 INSPECTOR_CAMERA_IDS = (
     "19443010B14C872F00",
-    "169.254.1.223",
+    "169.254.1.222",
 )
 MANAGER_CAMERA_IDS = (
     "194430108183F12E00",
-    "169.254.1.222",
+    "169.254.1.223",
 )
 
 # ----------------------------
@@ -97,7 +97,7 @@ NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
-PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision"
+PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision" | "experimental"
 CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
 VISION_ASSIST_ENABLED = True       # calibrated perception in shadow mode; does not control pick motion
 VISION_REFERENCE_MARKER_ID = 0     # marker used for camera-to-robot reference tracking
@@ -108,7 +108,7 @@ VISION_MARKER_CHANGE_ROT_DELTA_RAD = 0.15  # suppress jittery relogs when orient
 VISION_MARKER_CHANGE_LOG_ROTATION = False  # rotation flips alone do not count as meaningful block movement
 VISION_PICK_OBJECT_PERMANENCE_ENABLED = True  # keep last-seen pickup marker positions until that block is picked
 VISION_PICK_OBJECT_PERMANENCE_MAX_AGE_S = 2.0  # only trust remembered pickup markers for a very short time after last sighting
-VISION_DYNAMIC_PICK_SELECTION_ENABLED = True  # when vision pick mode is authoritative, choose the next source block from live marker observations
+VISION_DYNAMIC_PICK_SELECTION_ENABLED = True  # when experimental pick mode is authoritative, choose the next source block from live marker observations
 VISION_PICK_TEMPLATE_TARGET = "P3"  # provides fixed Z/orientation for single-shot perception picks
 VISION_PICK_WORKSPACE_X_MM = (210.0, 430.0)  # bounded XY workspace for arbitrary-on-plane perception picks
 VISION_PICK_WORKSPACE_Y_MM = (-80.0, 60.0)

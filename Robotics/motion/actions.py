@@ -89,7 +89,7 @@ class PickPoseUnavailableError(RuntimeError):
 
 def _active_pick_pose_provider() -> PickPoseProvider:
     mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower()
-    if mode in {"vision", "perception"}:
+    if mode == "experimental":
         return VisionPickPoseProvider()
     return DeterministicPickPoseProvider()
 
