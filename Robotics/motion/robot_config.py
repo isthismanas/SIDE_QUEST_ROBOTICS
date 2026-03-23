@@ -97,7 +97,7 @@ NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
-PICK_POSE_MODE = "vision"  # "deterministic" | "vision" | "experimental"
+PICK_POSE_MODE = "vision"  # "deterministic" | "vision" | "vision-autonomous" | "experimental"
 CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
 VISION_ASSIST_ENABLED = True       # calibrated perception in shadow mode; does not control pick motion
 VISION_REFERENCE_MARKER_ID = 0     # marker used for camera-to-robot reference tracking
@@ -108,7 +108,7 @@ VISION_MARKER_CHANGE_ROT_DELTA_RAD = 0.15  # suppress jittery relogs when orient
 VISION_MARKER_CHANGE_LOG_ROTATION = False  # rotation flips alone do not count as meaningful block movement
 VISION_PICK_OBJECT_PERMANENCE_ENABLED = True  # keep last-seen pickup marker positions until that block is picked
 VISION_PICK_OBJECT_PERMANENCE_MAX_AGE_S = 2.0  # only trust remembered pickup markers for a very short time after last sighting
-VISION_DYNAMIC_PICK_SELECTION_ENABLED = True  # when experimental pick mode is authoritative, choose the next source block from live marker observations
+VISION_DYNAMIC_PICK_SELECTION_ENABLED = True  # when controller-side vision pickup is authoritative, choose the next source block from marker observations
 VISION_PICK_TEMPLATE_TARGET = "P3"  # provides fixed Z/orientation for single-shot perception picks
 VISION_PICK_WORKSPACE_X_MM = (210.0, 430.0)  # bounded XY workspace for arbitrary-on-plane perception picks
 VISION_PICK_WORKSPACE_Y_MM = (-80.0, 60.0)

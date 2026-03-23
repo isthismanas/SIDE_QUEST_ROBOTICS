@@ -13,7 +13,7 @@ STATUS: DRAFT v0 – To be aligned with Manas before implementation.
 
 2. Robot controller → Unity
 - VISION_STATUS (OK/FAIL) + reason
-- current_pick_pose_mode (deterministic/vision)
+- current_pick_pose_mode (deterministic/vision/vision-autonomous)
 - retry_available (bool)
 
 3. Unity → Robot controller

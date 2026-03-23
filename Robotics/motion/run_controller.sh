@@ -39,9 +39,9 @@ VISION_ENABLE_PICK_ML="${SIDE_QUEST_VISION_ENABLE_PICK_ML:-0}"
 VISION_USE_DEPTH_MODULE="${SIDE_QUEST_VISION_USE_DEPTH_MODULE:-0}"
 VISION_PICK_ML_MODEL_JSON="${SIDE_QUEST_VISION_PICK_ML_MODEL_JSON:-}"
 
-if [[ "$PICK_MODE" == "vision" ]]; then
+if [[ "$PICK_MODE" == "vision-autonomous" || "$PICK_MODE" == "experimental" ]]; then
   echo "[RUN_CONTROLLER] PICK_POSE_MODE=$PICK_MODE"
-  echo "[RUN_CONTROLLER] Launching guarded standalone vision pick-place runtime."
+  echo "[RUN_CONTROLLER] Launching guarded standalone vision-autonomous pick-place runtime."
   echo "[RUN_CONTROLLER] device_id=$VISION_DEVICE_ID place_level=$VISION_PLACE_LEVEL"
 
   cmd=(

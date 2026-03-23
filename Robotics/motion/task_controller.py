@@ -118,6 +118,8 @@ run_id = None
 run_finalized = False
 _logged_raw_getpose_probe = False
 current_run_seed = None
+active_pick_target_id = None
+placed_pick_target_ids: list[str] = []
 committed_stack_level = 0
 pending_commit_level = None
 pending_commit_deadline = None
@@ -246,12 +248,73 @@ def _sync_json_log_context() -> None:
 
 
 def _current_pick_target_id() -> str | None:
+    if isinstance(active_pick_target_id, str) and active_pick_target_id.strip():
+        return str(active_pick_target_id)
     try:
         if 0 <= int(current_pick_index) < len(cfg.PICK_SEQUENCE):
             return str(cfg.PICK_SEQUENCE[int(current_pick_index)])
     except Exception:
         return None
     return None
+
+
+def _reset_pick_runtime_cache() -> None:
+    global active_pick_target_id, placed_pick_target_ids
+    active_pick_target_id = None
+    placed_pick_target_ids = []
+
+
+def _remaining_pick_targets() -> list[str]:
+    completed = {str(target_id) for target_id in placed_pick_target_ids}
+    if isinstance(active_pick_target_id, str) and active_pick_target_id.strip():
+        completed.add(str(active_pick_target_id))
+    return [
+        str(target_id)
+        for target_id in getattr(cfg, "PICK_SEQUENCE", [])
+        if str(target_id) not in completed
+    ]
+
+
+def _pick_selection_reason(selected_target_id: str, reason: str) -> None:
+    write_jsonl_event(
+        "block_state",
+        {
+            "event": "pick_target_selected",
+            "module": "CONTROL",
+            "pick_mode": str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower(),
+            "selected_target_id": str(selected_target_id),
+            "selection_reason": str(reason),
+            "remaining_targets": _remaining_pick_targets(),
+            "placed_pick_target_ids": list(placed_pick_target_ids),
+        },
+    )
+
+
+def _resolve_pick_target_for_cycle() -> str:
+    pick_mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+
+    if pick_mode == "vision":
+        remaining_targets = _remaining_pick_targets()
+        if not remaining_targets:
+            raise RuntimeError("no_remaining_pick_targets")
+
+        selected_target_id = vision_controller.select_next_pick_target(
+            remaining_targets,
+            debug_enabled=_is_debug_enabled(),
+            allow_cached=True,
+        )
+        if selected_target_id is not None:
+            _pick_selection_reason(selected_target_id, "vision_tracker")
+            return str(selected_target_id)
+
+        fallback_target_id = str(remaining_targets[0])
+        _pick_selection_reason(fallback_target_id, "deterministic_fallback")
+        return fallback_target_id
+
+    try:
+        return str(cfg.PICK_SEQUENCE[int(current_pick_index)])
+    except Exception as exc:
+        raise RuntimeError(f"pick_sequence_unavailable:{exc}")
 
 
 def _log_inferred_block_state(event_name: str, **fields) -> None:
@@ -349,6 +412,7 @@ def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
 
     current_pick_index = 0
     current_stack_level = 0
+    _reset_pick_runtime_cache()
     holding_block = False
     proposed_place_pose = None
     proposed_place_stack_level = None
@@ -484,6 +548,7 @@ def _handle_run_timeout() -> None:
     STATE = State.IDLE
     current_pick_index = 0
     current_stack_level = 0
+    _reset_pick_runtime_cache()
     holding_block = False
     participant_name = None
     tower_attempt_start_ts = None
@@ -852,6 +917,7 @@ def handle_command(cmd_str: str, source: str) -> None:
     global proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active
     global run_id, run_finalized, current_run_seed, DEBUG_ENABLED, _last_ready_level_printed
+    global active_pick_target_id, placed_pick_target_ids
     global LEADERBOARD_MODE, OFFICIAL_EVENT_ID
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
     global last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
@@ -878,6 +944,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         participant_name = name_value
         current_stack_level = 0
         current_pick_index = 0
+        _reset_pick_runtime_cache()
         session_id = f"{int(time.time())}-{uuid4().hex[:8]}"
         tower_attempt_start_ts = None
         run_start_time = None
@@ -1036,6 +1103,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         STATE = State.IDLE
         current_pick_index = 0
         current_stack_level = 0
+        _reset_pick_runtime_cache()
         holding_block = False
         participant_name = None
         tower_attempt_start_ts = None
@@ -1119,6 +1187,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             STATE = State.IDLE
             current_pick_index = 0
             current_stack_level = 0
+            _reset_pick_runtime_cache()
             drop_committed_this_window = False
             proposed_place_pose = None
             proposed_place_stack_level = None
@@ -1352,7 +1421,8 @@ def handle_command(cmd_str: str, source: str) -> None:
 
             # Execute pick sequence
             my_token = current_session_token
-            pick_target_id = cfg.PICK_SEQUENCE[current_pick_index]
+            pick_target_id = _resolve_pick_target_for_cycle()
+            active_pick_target_id = pick_target_id
             handles.combo_active = combo_active
             vision_controller.log_pick_tracking(
                 target_id=pick_target_id,
@@ -1362,6 +1432,7 @@ def handle_command(cmd_str: str, source: str) -> None:
             try:
                 actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
             except actions.PickPoseUnavailableError as e:
+                active_pick_target_id = None
                 if VISION_MODE_ENABLED:
                     _handle_vision_pick_unavailable(e.reason)
                     return
@@ -1376,7 +1447,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 "block_inferred_picked",
                 target_id=pick_target_id,
                 stack_level=int(current_stack_level),
-                source="deterministic_pick",
+                source="vision_assist_pick" if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower() == "vision" else "deterministic_pick",
                 pick_pose=pick_pose,
                 hover_pose=hover_pose,
             )
@@ -1794,6 +1865,10 @@ def handle_command(cmd_str: str, source: str) -> None:
                 return
 
             # Update stack counters only on success
+            if isinstance(placed_target_id, str) and placed_target_id.strip():
+                if placed_target_id not in placed_pick_target_ids:
+                    placed_pick_target_ids.append(placed_target_id)
+            active_pick_target_id = None
             current_stack_level += 1
             current_pick_index += 1
             _set_pending_commit(current_stack_level, time.monotonic() + 5.0)
@@ -1827,6 +1902,7 @@ def handle_command(cmd_str: str, source: str) -> None:
 
                     current_pick_index = 0
                     current_stack_level = 0
+                    _reset_pick_runtime_cache()
                     holding_block = False
                     proposed_place_pose = None
                     proposed_place_stack_level = None
@@ -1853,7 +1929,8 @@ def handle_command(cmd_str: str, source: str) -> None:
                     if auto_result.allowed:
                         STATE = auto_result.next_state
                         my_token = current_session_token
-                        pick_target_id = cfg.PICK_SEQUENCE[current_pick_index]
+                        pick_target_id = _resolve_pick_target_for_cycle()
+                        active_pick_target_id = pick_target_id
                         handles.combo_active = combo_active
                         vision_controller.log_pick_tracking(
                             target_id=pick_target_id,
@@ -1863,6 +1940,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         try:
                             actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
                         except actions.PickPoseUnavailableError as e:
+                            active_pick_target_id = None
                             if VISION_MODE_ENABLED:
                                 warn(module, f"[VISION] pick pose unavailable: {e.reason}")
                                 _send_line_to_unity("VISION_STATUS FAIL")
@@ -1880,7 +1958,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                             "block_inferred_picked",
                             target_id=pick_target_id,
                             stack_level=int(current_stack_level),
-                            source="deterministic_pick",
+                            source="vision_assist_pick" if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower() == "vision" else "deterministic_pick",
                             pick_pose=pick_pose,
                             hover_pose=hover_pose,
                         )
@@ -1950,6 +2028,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 STATE = State.IDLE
                 current_pick_index = 0
                 current_stack_level = 0
+                _reset_pick_runtime_cache()
                 proposed_place_pose = None
                 proposed_place_stack_level = None
                 current_zone = "GREEN"
@@ -2024,6 +2103,7 @@ def command_server():
             # Initialize fresh stacking session
             current_pick_index = 0
             current_stack_level = 0
+            _reset_pick_runtime_cache()
             # Dev 8 autonomous stacking loop controls
             stacking_enabled = True
             target_stack_count = cfg.stack_target_count()

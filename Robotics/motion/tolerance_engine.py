@@ -8,7 +8,7 @@ import robot_config as cfg
 import vision_bridge
 
 PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
-VISION_MODE_ENABLED = PICK_POSE_MODE == "experimental"
+VISION_MODE_ENABLED = PICK_POSE_MODE in {"vision", "experimental"}
 VISION_ASSIST_ENABLED = bool(getattr(cfg, "VISION_ASSIST_ENABLED", False))
 PERCEPTION_ASSIST_ENABLED = VISION_MODE_ENABLED or VISION_ASSIST_ENABLED
 

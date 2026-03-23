@@ -183,7 +183,13 @@ def track_pick_target(target_id: str) -> dict[str, Any]:
     return _track_target(target_id=target_id, marker_map=marker_map, expected_pose=expected_pose, role="pick")
 
 
-def select_live_pick_target(target_ids: list[str]) -> Optional[dict[str, Any]]:
+def select_pick_target(target_ids: list[str], allow_cached: bool = False) -> Optional[dict[str, Any]]:
+    source_priority = {
+        "live": 0,
+        "recent_last_seen": 1,
+        "cached_memory": 2,
+    }
+
     candidates: list[dict[str, Any]] = []
     for target_id in target_ids:
         tracking = track_pick_target(str(target_id))
@@ -191,7 +197,11 @@ def select_live_pick_target(target_ids: list[str]) -> Optional[dict[str, Any]]:
             continue
         if not tracking.get("available", False):
             continue
-        if str(tracking.get("observation_source", "")).strip().lower() != "live":
+
+        observation_source = str(tracking.get("observation_source", "")).strip().lower()
+        if not allow_cached and observation_source != "live":
+            continue
+        if allow_cached and observation_source not in source_priority:
             continue
         candidates.append(tracking)
 
@@ -200,12 +210,17 @@ def select_live_pick_target(target_ids: list[str]) -> Optional[dict[str, Any]]:
 
     candidates.sort(
         key=lambda item: (
-            float(item.get("last_seen_age_s", 0.0)),
+            int(source_priority.get(str(item.get("observation_source", "")).strip().lower(), 10**6)),
+            float(item.get("last_seen_age_s", 10**6)),
             int(item.get("marker_id", 10**9)),
             str(item.get("target_id", "")),
         )
     )
     return candidates[0]
+
+
+def select_live_pick_target(target_ids: list[str]) -> Optional[dict[str, Any]]:
+    return select_pick_target(target_ids, allow_cached=False)
 
 
 def track_drop_target(target_id: str) -> dict[str, Any]:

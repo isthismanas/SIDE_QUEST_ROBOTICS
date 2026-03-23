@@ -11,7 +11,8 @@ from logger import info, warn, write_jsonl_event
 
 
 PICK_POSE_MODE = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
-VISION_MODE_ENABLED = PICK_POSE_MODE == "experimental"
+VISION_MODE_ENABLED = PICK_POSE_MODE in {"vision", "experimental"}
+VISION_AUTONOMOUS_MODE_ENABLED = PICK_POSE_MODE in {"vision-autonomous", "experimental"}
 VISION_ASSIST_ENABLED = bool(getattr(cfg, "VISION_ASSIST_ENABLED", False))
 PERCEPTION_ASSIST_ENABLED = VISION_MODE_ENABLED or VISION_ASSIST_ENABLED
 
@@ -30,7 +31,7 @@ else:
 
         PERC_AVAILABLE = True
         if bool(getattr(cfg, "DEBUG_ENABLED", False)):
-            mode_label = "experimental authority" if VISION_MODE_ENABLED else "shadow assist"
+            mode_label = f"{PICK_POSE_MODE} pick authority" if VISION_MODE_ENABLED else "shadow assist"
             info("PERC", f"Perception module enabled ({mode_label})")
     except Exception as exc:
         warn("PERC", f"Perception module disabled: {exc}")
@@ -101,8 +102,11 @@ def reset_pick_tracking_memory() -> None:
     block_tracker.reset_pick_tracking_memory()
 
 
-def select_next_pick_target(remaining_targets: list[str], debug_enabled: bool = False) -> str | None:
-    selection = block_tracker.select_live_pick_target([str(target_id) for target_id in remaining_targets])
+def select_next_pick_target(remaining_targets: list[str], debug_enabled: bool = False, allow_cached: bool = False) -> str | None:
+    selection = block_tracker.select_pick_target(
+        [str(target_id) for target_id in remaining_targets],
+        allow_cached=bool(allow_cached),
+    )
     if selection is None:
         if debug_enabled:
             info("CONTROL", f"[VISION_PICK_SELECT] no live candidate among remaining={remaining_targets}")
@@ -114,6 +118,7 @@ def select_next_pick_target(remaining_targets: list[str], debug_enabled: bool = 
         info(
             "CONTROL",
             f"[VISION_PICK_SELECT] target={target_id} marker={selection['marker_id']} "
+            f"source={selection.get('observation_source')} "
             f"robot_xy=({robot_x:.2f},{robot_y:.2f}) age_s={float(selection.get('last_seen_age_s', 0.0)):.3f}",
         )
     return target_id
