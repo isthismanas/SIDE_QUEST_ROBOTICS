@@ -43,7 +43,13 @@ def get_perception_engine():
 
 
 def camera_stream_perception_binding(label: str) -> tuple[bool, Any]:
-    enable_raw = (label == "INSPECTOR" and PERCEPTION_ASSIST_ENABLED and PERC_AVAILABLE and _PERC_ENGINE is not None)
+    perception_label = str(getattr(cfg, "VISION_PERCEPTION_CAMERA_LABEL", "SITE_MANAGER")).strip().upper()
+    enable_raw = (
+        str(label).strip().upper() == perception_label
+        and PERCEPTION_ASSIST_ENABLED
+        and PERC_AVAILABLE
+        and _PERC_ENGINE is not None
+    )
     return enable_raw, _PERC_ENGINE if enable_raw else None
 
 

@@ -307,9 +307,7 @@ def _resolve_pick_target_for_cycle() -> str:
             _pick_selection_reason(selected_target_id, "vision_tracker")
             return str(selected_target_id)
 
-        fallback_target_id = str(remaining_targets[0])
-        _pick_selection_reason(fallback_target_id, "deterministic_fallback")
-        return fallback_target_id
+        raise RuntimeError("vision_pick_target_unavailable")
 
     try:
         return str(cfg.PICK_SEQUENCE[int(current_pick_index)])
@@ -1421,7 +1419,14 @@ def handle_command(cmd_str: str, source: str) -> None:
 
             # Execute pick sequence
             my_token = current_session_token
-            pick_target_id = _resolve_pick_target_for_cycle()
+            try:
+                pick_target_id = _resolve_pick_target_for_cycle()
+            except RuntimeError as e:
+                active_pick_target_id = None
+                if VISION_MODE_ENABLED:
+                    _handle_vision_pick_unavailable(str(e))
+                    return
+                raise
             active_pick_target_id = pick_target_id
             handles.combo_active = combo_active
             vision_controller.log_pick_tracking(
@@ -1929,7 +1934,17 @@ def handle_command(cmd_str: str, source: str) -> None:
                     if auto_result.allowed:
                         STATE = auto_result.next_state
                         my_token = current_session_token
-                        pick_target_id = _resolve_pick_target_for_cycle()
+                        try:
+                            pick_target_id = _resolve_pick_target_for_cycle()
+                        except RuntimeError as e:
+                            active_pick_target_id = None
+                            if VISION_MODE_ENABLED:
+                                warn(module, f"[VISION] pick target unavailable: {e}")
+                                _send_line_to_unity("VISION_STATUS FAIL")
+                                STATE = State.WAITING_FOR_REPOSITION
+                                info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick target unavailable)")
+                                return
+                            raise
                         active_pick_target_id = pick_target_id
                         handles.combo_active = combo_active
                         vision_controller.log_pick_tracking(

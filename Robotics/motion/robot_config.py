@@ -62,6 +62,7 @@ MANAGER_CAMERA_IDS = (
     "194430108183F12E00",
     "169.254.1.223",
 )
+VISION_PERCEPTION_CAMERA_LABEL = "SITE_MANAGER"
 
 # ----------------------------
 # Speed Profiles

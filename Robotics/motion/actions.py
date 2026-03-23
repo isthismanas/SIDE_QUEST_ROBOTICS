@@ -54,37 +54,28 @@ class DeterministicPickPoseProvider(PickPoseProvider):
 class VisionPickPoseProvider(PickPoseProvider):
     def get_pick_pose(self, target_id: str) -> tuple[Optional[cfg_pose_type], str]:
         tracking = block_tracker.track_pick_target(target_id)
+        if not tracking.get("configured", False):
+            return None, str(tracking.get("reason", "marker_unmapped"))
+        if not tracking.get("available", False):
+            return None, str(tracking.get("reason", "marker_unavailable"))
+
         try:
             template_pose = cfg.pick_target_pose(target_id)
         except Exception as e:
             return None, str(e)
 
-        if tracking.get("configured", False) and tracking.get("available", False):
-            robot_x, robot_y = tracking["robot_xy"]
-            observation_source = str(tracking.get("observation_source", "")).strip().lower() or "unknown"
-            return (
-                (
-                    float(robot_x),
-                    float(robot_y),
-                    float(template_pose[2]),
-                    float(template_pose[3]),
-                    float(template_pose[4]),
-                    float(template_pose[5]),
-                ),
-                f"ok:{observation_source}",
-            )
-
-        fallback_reason = str(tracking.get("reason", "marker_unavailable"))
+        robot_x, robot_y = tracking["robot_xy"]
+        observation_source = str(tracking.get("observation_source", "")).strip().lower() or "unknown"
         return (
             (
-                float(template_pose[0]),
-                float(template_pose[1]),
+                float(robot_x),
+                float(robot_y),
                 float(template_pose[2]),
                 float(template_pose[3]),
                 float(template_pose[4]),
                 float(template_pose[5]),
             ),
-            f"fallback_deterministic:{fallback_reason}",
+            f"ok:{observation_source}",
         )
 
 
