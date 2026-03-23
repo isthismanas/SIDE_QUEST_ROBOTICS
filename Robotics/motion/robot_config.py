@@ -97,7 +97,7 @@ NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
-PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision" | "experimental"
+PICK_POSE_MODE = "vision"  # "deterministic" | "vision" | "experimental"
 CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
 VISION_ASSIST_ENABLED = True       # calibrated perception in shadow mode; does not control pick motion
 VISION_REFERENCE_MARKER_ID = 0     # marker used for camera-to-robot reference tracking
