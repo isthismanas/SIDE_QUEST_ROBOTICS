@@ -156,18 +156,48 @@ def _device_identifiers(device_info: object, index: int) -> tuple[str, ...]:
 
 
 def _primary_device_id(device_info: object, index: int) -> str:
+    getter = getattr(device_info, "getMxId", None)
+    if callable(getter):
+        try:
+            value = getter()
+            if value:
+                return str(value)
+        except Exception:
+            pass
+
+    for attr_name in ("mxid", "mxId", "name"):
+        value = getattr(device_info, attr_name, None)
+        if value:
+            return str(value)
+
     identifiers = _device_identifiers(device_info, index)
     return str(identifiers[0])
 
 
-def _roles_for_identifiers(identifiers: tuple[str, ...]) -> list[str]:
+def _role_match_details(identifiers: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
     identifier_set = {str(value) for value in identifiers}
+    inspector_matches = tuple(
+        str(value) for value in getattr(cfg, "INSPECTOR_CAMERA_IDS", ()) if str(value) in identifier_set
+    )
+    manager_matches = tuple(
+        str(value) for value in getattr(cfg, "MANAGER_CAMERA_IDS", ()) if str(value) in identifier_set
+    )
+    return {
+        "INSPECTOR": inspector_matches,
+        "SITE_MANAGER": manager_matches,
+    }
+
+
+def _configured_roles(details: dict[str, tuple[str, ...]]) -> list[str]:
     roles: list[str] = []
-    if identifier_set & {str(value) for value in getattr(cfg, "INSPECTOR_CAMERA_IDS", ())}:
-        roles.append("INSPECTOR")
-    if identifier_set & {str(value) for value in getattr(cfg, "MANAGER_CAMERA_IDS", ())}:
-        roles.append("SITE_MANAGER")
+    for role_name in ("INSPECTOR", "SITE_MANAGER"):
+        if details.get(role_name):
+            roles.append(role_name)
     return roles
+
+
+def _role_conflict(details: dict[str, tuple[str, ...]]) -> bool:
+    return len(_configured_roles(details)) > 1
 
 
 def _resolve_target_devices(
@@ -241,7 +271,7 @@ def _probe_device_v2(
     min_valid_depth_mm: float,
     max_valid_depth_mm: float,
 ) -> dict[str, Any]:
-    started_at = time.time()
+    started_at = time.monotonic()
     raw_frames = 0
     depth_frames = 0
     valid_ratios: list[float] = []
@@ -249,6 +279,9 @@ def _probe_device_v2(
     raw_shape = None
     depth_shape = None
     depth_dtype = None
+    first_raw_ts = None
+    last_raw_ts = None
+    first_depth_ts = None
     last_depth_ts = None
 
     pipeline = _build_depth_probe_v2_pipeline(fps=fps)
@@ -261,7 +294,7 @@ def _probe_device_v2(
         raw_queue = device.getOutputQueue("rawL", maxSize=4, blocking=False)
         depth_queue = device.getOutputQueue("depth", maxSize=4, blocking=False)
 
-        while (time.time() - started_at) < duration_s:
+        while (time.monotonic() - started_at) < duration_s:
             did_work = False
 
             raw_packet = raw_queue.tryGet()
@@ -269,6 +302,10 @@ def _probe_device_v2(
                 raw_frame = raw_packet.getCvFrame()
                 raw_frames += 1
                 raw_shape = tuple(int(v) for v in raw_frame.shape)
+                now = time.monotonic()
+                if first_raw_ts is None:
+                    first_raw_ts = now
+                last_raw_ts = now
                 did_work = True
                 raw_packet = raw_queue.tryGet()
 
@@ -278,7 +315,10 @@ def _probe_device_v2(
                 depth_frames += 1
                 depth_shape = tuple(int(v) for v in depth_frame.shape)
                 depth_dtype = str(depth_frame.dtype)
-                last_depth_ts = time.time()
+                now = time.monotonic()
+                if first_depth_ts is None:
+                    first_depth_ts = now
+                last_depth_ts = now
 
                 valid_mask = (
                     np.isfinite(depth_frame)
@@ -299,10 +339,19 @@ def _probe_device_v2(
             if not did_work:
                 time.sleep(0.01)
 
+    elapsed_s = max(0.0, time.monotonic() - started_at)
+    raw_stream_span_s = None if first_raw_ts is None or last_raw_ts is None else max(0.0, last_raw_ts - first_raw_ts)
+    depth_stream_span_s = None if first_depth_ts is None or last_depth_ts is None else max(0.0, last_depth_ts - first_depth_ts)
+
     return {
         "api_path": "v2_xlink",
+        "probe_elapsed_s": float(elapsed_s),
         "raw_frames": int(raw_frames),
         "depth_frames": int(depth_frames),
+        "raw_observed_fps": (float(raw_frames / elapsed_s) if elapsed_s > 0.0 else 0.0),
+        "depth_observed_fps": (float(depth_frames / elapsed_s) if elapsed_s > 0.0 else 0.0),
+        "raw_stream_span_s": raw_stream_span_s,
+        "depth_stream_span_s": depth_stream_span_s,
         "raw_shape": raw_shape,
         "depth_shape": depth_shape,
         "depth_dtype": depth_dtype,
@@ -314,7 +363,7 @@ def _probe_device_v2(
             float(np.median(valid_median_depths_mm)) if valid_median_depths_mm else None
         ),
         "last_depth_age_s": (
-            None if last_depth_ts is None else max(0.0, time.time() - float(last_depth_ts))
+            None if last_depth_ts is None else max(0.0, time.monotonic() - float(last_depth_ts))
         ),
     }
 
@@ -393,12 +442,17 @@ def _print_available_devices(devices: list[tuple[dai.DeviceInfo, str, tuple[str,
     print(f"[DEPTH_PROBE] Visible OAK devices={len(devices)}")
     for device_info, device_id, identifiers in devices:
         name = _device_name(device_info)
-        roles = _roles_for_identifiers(identifiers)
+        role_details = _role_match_details(identifiers)
+        roles = _configured_roles(role_details)
         role_text = ",".join(roles) if roles else "unmapped"
         extra = f" name={name}" if name else ""
         print(
             "[DEPTH_PROBE] "
             f"device_id={device_id} identifiers={identifiers} roles={role_text}{extra}"
+        )
+        print(
+            "[DEPTH_PROBE] "
+            f"role_match_details={role_details} role_conflict={_role_conflict(role_details)}"
         )
 
 
@@ -425,10 +479,14 @@ def _run_probe(args: argparse.Namespace) -> int:
 
     failure_count = 0
     for device_info, device_id, identifiers in targets:
-        roles = _roles_for_identifiers(identifiers)
+        role_details = _role_match_details(identifiers)
+        roles = _configured_roles(role_details)
         role_text = ",".join(roles) if roles else "unmapped"
         print(
             f"[DEPTH_PROBE] --- device_id={device_id} identifiers={identifiers} roles={role_text} ---"
+        )
+        print(
+            f"[DEPTH_PROBE] role_match_details={role_details} role_conflict={_role_conflict(role_details)}"
         )
         try:
             summary = _probe_device(
@@ -440,8 +498,13 @@ def _run_probe(args: argparse.Namespace) -> int:
             )
             for key in (
                 "api_path",
+                "probe_elapsed_s",
                 "raw_frames",
                 "depth_frames",
+                "raw_observed_fps",
+                "depth_observed_fps",
+                "raw_stream_span_s",
+                "depth_stream_span_s",
                 "raw_shape",
                 "depth_shape",
                 "depth_dtype",
