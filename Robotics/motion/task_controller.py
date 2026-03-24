@@ -1663,6 +1663,12 @@ def handle_command(cmd_str: str, source: str) -> None:
                 raise
             active_pick_target_id = pick_target_id
             active_pick_claim_target_id = _nearest_pick_slot_claim(pick_target_id)
+            if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower() == "vision":
+                console_info(
+                    "CONTROL",
+                    f"[VISION] selected_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}",
+                    essential=True,
+                )
             handles.combo_active = combo_active
             vision_controller.log_pick_tracking(
                 target_id=pick_target_id,

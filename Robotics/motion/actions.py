@@ -51,6 +51,28 @@ class DeterministicPickPoseProvider(PickPoseProvider):
             return None, str(e)
 
 
+def _nearest_pick_slot_for_xy(robot_x_mm: float, robot_y_mm: float) -> tuple[Optional[str], Optional[cfg_pose_type], Optional[float]]:
+    best_target_id: Optional[str] = None
+    best_pose: Optional[cfg_pose_type] = None
+    best_norm: Optional[float] = None
+    for candidate_id, candidate_pose in getattr(cfg, "PICKUP_POINTS", {}).items():
+        dx = float(robot_x_mm) - float(candidate_pose[0])
+        dy = float(robot_y_mm) - float(candidate_pose[1])
+        norm = (dx * dx + dy * dy) ** 0.5
+        if best_norm is None or norm < best_norm:
+            best_target_id = str(candidate_id)
+            best_pose = (
+                float(candidate_pose[0]),
+                float(candidate_pose[1]),
+                float(candidate_pose[2]),
+                float(candidate_pose[3]),
+                float(candidate_pose[4]),
+                float(candidate_pose[5]),
+            )
+            best_norm = norm
+    return best_target_id, best_pose, best_norm
+
+
 class VisionPickPoseProvider(PickPoseProvider):
     def get_pick_pose(self, target_id: str) -> tuple[Optional[cfg_pose_type], str]:
         tracking = block_tracker.track_pick_target(target_id)
@@ -66,6 +88,14 @@ class VisionPickPoseProvider(PickPoseProvider):
 
         robot_x, robot_y = tracking["robot_xy"]
         observation_source = str(tracking.get("observation_source", "")).strip().lower() or "unknown"
+        mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+        if mode == "vision":
+            nearest_target_id, _nearest_pose, nearest_norm = _nearest_pick_slot_for_xy(float(robot_x), float(robot_y))
+            claim_radius_mm = float(getattr(cfg, "VISION_PICK_SLOT_CLAIM_RADIUS_MM", 70.0))
+            if nearest_target_id is None or nearest_norm is None:
+                return None, "vision_pick_slot_unresolved"
+            if nearest_norm > claim_radius_mm:
+                return None, f"vision_pick_outside_slot_vicinity:{nearest_target_id}:{nearest_norm:.3f}"
         return (
             (
                 float(robot_x),
