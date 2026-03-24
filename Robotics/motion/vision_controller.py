@@ -192,3 +192,9 @@ def _log_block_tracking(context: str, tracking: dict[str, Any], debug_enabled: b
         }
     )
     write_jsonl_event("block_track", event_payload)
+
+
+def shutdown_perception():
+    """Shut down the perception engine worker thread."""
+    if _PERC_ENGINE is not None:
+        _PERC_ENGINE.stop_worker()

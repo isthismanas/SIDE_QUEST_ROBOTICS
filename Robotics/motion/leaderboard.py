@@ -759,6 +759,8 @@ def leaderboard_http_server(ctx: LeaderboardContext, stop_event, port: int) -> N
         _ctx = ctx
 
     server = ThreadingHTTPServer(("0.0.0.0", port), BoundHandler)
+    # Poll stop_event regularly so Ctrl+C shutdown is responsive even when idle.
+    server.timeout = 1.0
     info("STACK", f"[LEADERBOARD] HTTP server listening on {port}")
     try:
         while not stop_event.is_set():

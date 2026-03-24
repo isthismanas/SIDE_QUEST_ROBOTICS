@@ -1,4 +1,4 @@
-import time, socket, struct, os, threading, json, sys, subprocess
+import time, socket, struct, os, threading, json, sys, subprocess, signal
 import warnings
 import secrets
 from datetime import timedelta
@@ -386,7 +386,7 @@ def _retrain_pick_ml_before_run() -> bool:
         "--use-log-confirmation-samples",
         "--use-runtime-residual-samples",
     ]
-    console_info("VISION", "[VISION] Retraining pickup ML from previous logs before run start...", essential=True)
+    console_info("VISION", "[VISION] Retraining pickup ML from previous logs before run start...", essential=_is_debug_enabled())
     started_at = time.monotonic()
     try:
         result = subprocess.run(
@@ -463,7 +463,7 @@ def _retrain_pick_ml_before_run() -> bool:
         f"loo_rmse_total_mm={metrics.get('loo_rmse_total_mm', '?')} "
         f"duration_s={duration_s:.1f}"
     )
-    console_info("VISION", summary, essential=True)
+    console_info("VISION", summary, essential=_is_debug_enabled())
     write_jsonl_event(
         "motion_trace",
         {
@@ -926,7 +926,7 @@ def _emit_ready_prompt(level) -> None:
     if level == _last_ready_level_printed:
         return
     _last_ready_level_printed = level
-    console_info("CONTROL", f"READY: waiting for DROP/FIX (stack_level={level})", essential=True)
+    console_info("CONTROL", f"READY: waiting for DROP/FIX (stack_level={level})", essential=_is_debug_enabled())
 
 
 def _set_debug_enabled(enabled: bool) -> None:
@@ -1749,7 +1749,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                         if pick_mode_override is None
                         else f"[VISION] deterministic_fallback_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}"
                     ),
-                    essential=True,
+                    essential=_is_debug_enabled(),
                 )
             handles.combo_active = combo_active
             vision_controller.log_pick_tracking(
@@ -2130,7 +2130,8 @@ def handle_command(cmd_str: str, source: str) -> None:
                         send_boost_end()
                         combo_active = False
                         handles.combo_active = combo_active
-                        warn("COMBO", "combo ended")
+                        if _is_debug_enabled():
+                            warn("COMBO", "combo ended")
                     send_boost_state(0, False)
                     console_emit(f"[FAULT] RobotMode={m} -> entering FAULT", tag="FAULT", level="WARN", module=module, allow_in_quiet=True)
                     fault_result = step(STATE, Event.FAULT)
@@ -2157,13 +2158,15 @@ def handle_command(cmd_str: str, source: str) -> None:
                             send_boost_end()
                             combo_active = False
                             handles.combo_active = combo_active
-                            warn("COMBO", "combo ended")
+                            if _is_debug_enabled():
+                                warn("COMBO", "combo ended")
                         send_boost_state(0, False)
 
                     combo_target = int(getattr(cfg, "COMBO_GREEN_PLACEMENTS_TARGET", 3))
                     if combo_target > 0 and green_place_streak >= combo_target:
                         participant = participant_name.strip() if isinstance(participant_name, str) and participant_name.strip() else "UNKNOWN"
-                        warn("COMBO", f"{participant} combo achieved: {combo_target}x GREEN placements")
+                        if _is_debug_enabled():
+                            warn("COMBO", f"{participant} combo achieved: {combo_target}x GREEN placements")
                         combo_active = True
                         handles.combo_active = combo_active
                         send_boost_state(combo_target, True)
@@ -2209,7 +2212,8 @@ def handle_command(cmd_str: str, source: str) -> None:
                     send_boost_end()
                     combo_active = False
                     handles.combo_active = combo_active
-                    warn("COMBO", "combo ended")
+                    if _is_debug_enabled():
+                        warn("COMBO", "combo ended")
                 send_boost_state(0, False)
                 warn(module, f"[STACK] Place failed: {e}")
                 proposed_place_pose = None
@@ -2330,7 +2334,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                                     if pick_mode_override is None
                                     else f"[VISION] deterministic_fallback_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}"
                                 ),
-                                essential=True,
+                                essential=_is_debug_enabled(),
                             )
                         handles.combo_active = combo_active
                         vision_controller.log_pick_tracking(
@@ -2882,21 +2886,25 @@ try:
         time.sleep(0.1)
 except KeyboardInterrupt:
     info("CONTROL", "[MAIN] Ctrl+C received. Initiating graceful shutdown...")
+    try:
+        # Ignore repeated Ctrl+C while Python tears down worker threads.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except Exception:
+        pass
     STOP_EVENT.set()
+    vision_controller.shutdown_perception()
     cleanup_errors = _close_all_tracked_sockets()
-    alive_threads = _join_worker_threads(timeout_s=1.0)
+    alive_threads = _join_worker_threads(timeout_s=3.0)
 
     if alive_threads:
         if _is_debug_enabled():
             warn("CONTROL", f"[MAIN] Threads still alive after join timeout: {alive_threads}")
-        cleanup_errors.append(RuntimeError("Worker threads still alive after shutdown timeout"))
 
     if cleanup_errors:
         if _is_debug_enabled():
-            warn("CONTROL", f"[MAIN] Shutdown encountered {len(cleanup_errors)} issue(s). Exiting with code 1.")
-        sys.exit(1)
+            warn("CONTROL", f"[MAIN] Shutdown encountered {len(cleanup_errors)} cleanup issue(s).")
 
     info("CONTROL", "[MAIN] Shutdown complete.")
-    if _is_official_mode():
-        os._exit(0)
-    sys.exit(0)
+    # Exit deterministically after best-effort cleanup, avoiding interpreter
+    # thread teardown races when Ctrl+C is pressed repeatedly.
+    os._exit(0)
