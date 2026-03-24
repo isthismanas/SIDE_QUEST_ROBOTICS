@@ -1,0 +1,22 @@
+{
+  "active_pick_claim_target_id": "P6",
+  "active_pick_target_id": "P5",
+  "current_pick_index": 1,
+  "current_stack_level": 1,
+  "expected_workbench_brick_count": 7,
+  "participant_name": "AlbertT13",
+  "pick_mode": "vision",
+  "placed_pick_target_ids": [
+    "P2",
+    "P6"
+  ],
+  "remaining_targets": [
+    "P1",
+    "P3",
+    "P4",
+    "P7"
+  ],
+  "run_id": "bc2f503c950a42118217da5734f4f5f1",
+  "session_id": "1774326543-af2d7c6f",
+  "ts_unix": 1774326574.4468362
+}
