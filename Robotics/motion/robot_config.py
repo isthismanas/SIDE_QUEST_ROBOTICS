@@ -73,7 +73,7 @@ SPEED_PRECISION = 15     # nudges + placing (fine motion)
 # Combo mode
 COMBO_SPEED_BONUS = 10 #may be deprecated in favor of manual speed values provided
 COMBO_ENABLED = True
-COMBO_GREEN_PLACEMENTS_TARGET = 3
+COMBO_GREEN_PLACEMENTS_TARGET = 1
 MOVEJ_SPEED_NORMAL = 20
 MOVEJ_SPEED_COMBO = 90
 
@@ -98,7 +98,7 @@ NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
-PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision" | "vision-autonomous" | "experimental"
+PICK_POSE_MODE = "vision"  # "deterministic" | "vision" | "vision-autonomous" | "experimental"
 CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
 VISION_ASSIST_ENABLED = True       # calibrated perception in shadow mode; does not control pick motion
 VISION_REFERENCE_MARKER_ID = 0     # marker used for camera-to-robot reference tracking
@@ -417,7 +417,7 @@ DRIFT_MAX_XY_MM = 5.0
 # 0.0 = no drift
 # 1.0 = baseline
 # 2.0 = double drift
-DRIFT_SCALE = 1.35
+DRIFT_SCALE = 1.4
 DRIFT_SCALE_DEFAULT = DRIFT_SCALE
 
 # Distribution mode
