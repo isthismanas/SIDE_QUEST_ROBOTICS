@@ -120,8 +120,10 @@ run_finalized = False
 _logged_raw_getpose_probe = False
 current_run_seed = None
 active_pick_target_id = None
+active_pick_marker_target_id = None
 active_pick_claim_target_id = None
 placed_pick_target_ids: list[str] = []
+picked_marker_target_ids: list[str] = []
 expected_workbench_brick_count = None
 committed_stack_level = 0
 pending_commit_level = None
@@ -272,10 +274,13 @@ def _current_pick_target_id() -> str | None:
 
 
 def _reset_pick_runtime_cache() -> None:
-    global active_pick_target_id, active_pick_claim_target_id, placed_pick_target_ids, expected_workbench_brick_count
+    global active_pick_target_id, active_pick_marker_target_id, active_pick_claim_target_id
+    global placed_pick_target_ids, picked_marker_target_ids, expected_workbench_brick_count
     active_pick_target_id = None
+    active_pick_marker_target_id = None
     active_pick_claim_target_id = None
     placed_pick_target_ids = []
+    picked_marker_target_ids = []
 
 
 def _write_vision_assist_state() -> None:
@@ -285,12 +290,17 @@ def _write_vision_assist_state() -> None:
         "run_id": run_id,
         "pick_mode": str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower(),
         "expected_workbench_brick_count": expected_workbench_brick_count,
+        "claimed_pick_slot_ids": list(placed_pick_target_ids),
+        "picked_marker_target_ids": list(picked_marker_target_ids),
         "placed_pick_target_ids": list(placed_pick_target_ids),
         "active_pick_target_id": active_pick_target_id,
+        "active_pick_marker_target_id": active_pick_marker_target_id,
         "active_pick_claim_target_id": active_pick_claim_target_id,
         "current_stack_level": int(current_stack_level) if isinstance(current_stack_level, int) else current_stack_level,
         "current_pick_index": int(current_pick_index) if isinstance(current_pick_index, int) else current_pick_index,
-        "remaining_targets": _remaining_pick_targets(),
+        "remaining_pick_slots": _remaining_pick_slots(),
+        "remaining_marker_targets": _remaining_marker_targets(),
+        "remaining_targets": _remaining_pick_slots(),
         "ts_unix": time.time(),
     }
     os.makedirs(os.path.dirname(VISION_ASSIST_STATE_PATH), exist_ok=True)
@@ -475,15 +485,33 @@ def _retrain_pick_ml_before_run() -> bool:
     return True
 
 
-def _remaining_pick_targets() -> list[str]:
+def _remaining_pick_slots() -> list[str]:
     completed = {str(target_id) for target_id in placed_pick_target_ids}
-    if isinstance(active_pick_target_id, str) and active_pick_target_id.strip():
-        completed.add(str(active_pick_target_id))
+    if isinstance(active_pick_claim_target_id, str) and active_pick_claim_target_id.strip():
+        completed.add(str(active_pick_claim_target_id))
     return [
         str(target_id)
         for target_id in getattr(cfg, "PICK_SEQUENCE", [])
         if str(target_id) not in completed
     ]
+
+
+def _remaining_marker_targets() -> list[str]:
+    completed = {str(target_id) for target_id in picked_marker_target_ids}
+    if isinstance(active_pick_marker_target_id, str) and active_pick_marker_target_id.strip():
+        completed.add(str(active_pick_marker_target_id))
+    return [
+        str(target_id)
+        for target_id in getattr(cfg, "PICK_SEQUENCE", [])
+        if str(target_id) not in completed
+    ]
+
+
+def _remaining_pick_targets() -> list[str]:
+    pick_mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+    if pick_mode == "vision":
+        return _remaining_pick_slots()
+    return _remaining_pick_slots()
 
 
 def _pick_selection_reason(selected_target_id: str, reason: str) -> None:
@@ -495,33 +523,85 @@ def _pick_selection_reason(selected_target_id: str, reason: str) -> None:
             "pick_mode": str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower(),
             "selected_target_id": str(selected_target_id),
             "selection_reason": str(reason),
-            "remaining_targets": _remaining_pick_targets(),
+            "remaining_pick_slots": _remaining_pick_slots(),
+            "remaining_marker_targets": _remaining_marker_targets(),
+            "remaining_targets": _remaining_pick_slots(),
             "placed_pick_target_ids": list(placed_pick_target_ids),
+            "picked_marker_target_ids": list(picked_marker_target_ids),
         },
     )
 
 
-def _resolve_pick_target_for_cycle() -> str:
+def _clear_active_pick_targets() -> None:
+    global active_pick_target_id, active_pick_marker_target_id, active_pick_claim_target_id
+    active_pick_target_id = None
+    active_pick_marker_target_id = None
+    active_pick_claim_target_id = None
+
+
+def _set_active_pick_targets(pick_target_id: str, pick_mode_override: str | None) -> None:
+    global active_pick_target_id, active_pick_marker_target_id, active_pick_claim_target_id
+    active_pick_target_id = str(pick_target_id)
+    pick_mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+    if pick_mode == "vision" and pick_mode_override is None:
+        active_pick_marker_target_id = str(pick_target_id)
+    else:
+        active_pick_marker_target_id = None
+    active_pick_claim_target_id = _nearest_pick_slot_claim(str(pick_target_id))
+
+
+def _deterministic_remaining_pick_fallback_target(
+    reason: str,
+    remaining_slots: list[str] | None = None,
+) -> tuple[str | None, str | None]:
+    pick_mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
+    if pick_mode != "vision":
+        return None, None
+
+    ordered_slots = [str(target_id) for target_id in (remaining_slots or _remaining_pick_slots())]
+    if not ordered_slots:
+        return None, None
+
+    fallback_target_id = str(ordered_slots[0])
+    selection_reason = f"deterministic_remaining_slot:{reason}"
+    console_info(
+        "CONTROL",
+        f"[VISION] deterministic remaining-slot fallback target={fallback_target_id} reason={reason}",
+        essential=True,
+    )
+    _pick_selection_reason(fallback_target_id, selection_reason)
+    return fallback_target_id, "deterministic"
+
+
+def _resolve_pick_target_for_cycle() -> tuple[str, str | None]:
     pick_mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower()
 
     if pick_mode == "vision":
-        remaining_targets = _remaining_pick_targets()
-        if not remaining_targets:
+        remaining_marker_targets = _remaining_marker_targets()
+        remaining_pick_slots = _remaining_pick_slots()
+        if not remaining_marker_targets and not remaining_pick_slots:
             raise RuntimeError("no_remaining_pick_targets")
 
         selected_target_id = vision_controller.select_next_pick_target(
-            remaining_targets,
+            remaining_marker_targets,
             debug_enabled=_is_debug_enabled(),
             allow_cached=True,
         )
         if selected_target_id is not None:
             _pick_selection_reason(selected_target_id, "vision_tracker")
-            return str(selected_target_id)
+            return str(selected_target_id), None
+
+        fallback_target_id, pick_mode_override = _deterministic_remaining_pick_fallback_target(
+            "vision_pick_target_unavailable",
+            remaining_slots=remaining_pick_slots,
+        )
+        if fallback_target_id is not None:
+            return fallback_target_id, pick_mode_override
 
         raise RuntimeError("vision_pick_target_unavailable")
 
     try:
-        return str(cfg.PICK_SEQUENCE[int(current_pick_index)])
+        return str(cfg.PICK_SEQUENCE[int(current_pick_index)]), None
     except Exception as exc:
         raise RuntimeError(f"pick_sequence_unavailable:{exc}")
 
@@ -1126,7 +1206,8 @@ def handle_command(cmd_str: str, source: str) -> None:
     global proposed_place_pose, proposed_place_stack_level
     global current_zone, current_zone_stack_level, green_place_streak, combo_active
     global run_id, run_finalized, current_run_seed, DEBUG_ENABLED, _last_ready_level_printed
-    global active_pick_target_id, active_pick_claim_target_id, placed_pick_target_ids, expected_workbench_brick_count
+    global active_pick_target_id, active_pick_marker_target_id, active_pick_claim_target_id
+    global placed_pick_target_ids, picked_marker_target_ids, expected_workbench_brick_count
     global LEADERBOARD_MODE, OFFICIAL_EVENT_ID
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
     global last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
@@ -1188,18 +1269,11 @@ def handle_command(cmd_str: str, source: str) -> None:
         _send_line_to_unity("NAME_SET")
         log_event("EVENT_NAME_SET", participant=participant_name, source=source)
         if expected_workbench_brick_count is not None:
-            retrain_ok = _retrain_pick_ml_before_run()
             console_info(
                 "CONTROL",
-                f"Workbench brick count set to {expected_workbench_brick_count}. Starting run.",
+                f"Workbench brick count set to {expected_workbench_brick_count}. Ready to START.",
                 essential=True,
             )
-            if not retrain_ok:
-                warn(
-                    "VISION",
-                    "[VISION] Pickup ML retraining did not complete cleanly. Starting anyway with the existing model.",
-                )
-            handle_command("START", source)
             return
         console_info("CONTROL", f"Participant set: {participant_name}. Ready to START.", essential=True)
         return
@@ -1611,6 +1685,14 @@ def handle_command(cmd_str: str, source: str) -> None:
                 warn(module, "[STACK] Tower full. Ignoring START.")
                 return
 
+            if event == Event.START_STACK and current_stack_level == 0:
+                retrain_ok = _retrain_pick_ml_before_run()
+                if not retrain_ok:
+                    warn(
+                        "VISION",
+                        "[VISION] Pickup ML retraining did not complete cleanly. Starting anyway with the existing model.",
+                    )
+
             # Run start timing (monotonic) when a new run actually begins
             if current_stack_level == 0:
                 _last_ready_level_printed = None
@@ -1653,20 +1735,22 @@ def handle_command(cmd_str: str, source: str) -> None:
             # Execute pick sequence
             my_token = current_session_token
             try:
-                pick_target_id = _resolve_pick_target_for_cycle()
+                pick_target_id, pick_mode_override = _resolve_pick_target_for_cycle()
             except RuntimeError as e:
-                active_pick_target_id = None
-                active_pick_claim_target_id = None
+                _clear_active_pick_targets()
                 if VISION_MODE_ENABLED:
                     _handle_vision_pick_unavailable(str(e))
                     return
                 raise
-            active_pick_target_id = pick_target_id
-            active_pick_claim_target_id = _nearest_pick_slot_claim(pick_target_id)
+            _set_active_pick_targets(pick_target_id, pick_mode_override)
             if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower() == "vision":
                 console_info(
                     "CONTROL",
-                    f"[VISION] selected_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}",
+                    (
+                        f"[VISION] selected_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}"
+                        if pick_mode_override is None
+                        else f"[VISION] deterministic_fallback_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}"
+                    ),
                     essential=True,
                 )
             handles.combo_active = combo_active
@@ -1676,14 +1760,44 @@ def handle_command(cmd_str: str, source: str) -> None:
                 debug_enabled=_is_debug_enabled(),
             )
             try:
-                actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
+                actions.execute_pick_sequence(
+                    handles,
+                    pick_target_id,
+                    current_stack_level,
+                    pick_mode_override=pick_mode_override,
+                )
             except actions.PickPoseUnavailableError as e:
-                active_pick_target_id = None
-                active_pick_claim_target_id = None
+                _clear_active_pick_targets()
                 if VISION_MODE_ENABLED:
-                    _handle_vision_pick_unavailable(e.reason)
-                    return
-                raise
+                    fallback_target_id, pick_mode_override = _deterministic_remaining_pick_fallback_target(e.reason)
+                    if fallback_target_id is None:
+                        _handle_vision_pick_unavailable(e.reason)
+                        return
+                    pick_target_id = fallback_target_id
+                    _set_active_pick_targets(pick_target_id, pick_mode_override)
+                    console_info(
+                        "CONTROL",
+                        f"[VISION] deterministic_fallback_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}",
+                        essential=True,
+                    )
+                    handles.combo_active = combo_active
+                    vision_controller.log_pick_tracking(
+                        target_id=pick_target_id,
+                        stack_level=current_stack_level,
+                        debug_enabled=_is_debug_enabled(),
+                    )
+                    try:
+                        actions.execute_pick_sequence(
+                            handles,
+                            pick_target_id,
+                            current_stack_level,
+                            pick_mode_override=pick_mode_override,
+                        )
+                    except actions.PickPoseUnavailableError as fallback_error:
+                        _handle_vision_pick_unavailable(f"{e.reason}->deterministic_fallback:{fallback_error.reason}")
+                        return
+                else:
+                    raise
             try:
                 pick_pose = cfg.pick_target_pose(pick_target_id)
                 hover_pose = cfg.pick_target_hover_pose(pick_target_id)
@@ -2113,6 +2227,10 @@ def handle_command(cmd_str: str, source: str) -> None:
 
             # Update stack counters only on success
             if isinstance(placed_target_id, str) and placed_target_id.strip():
+                if isinstance(active_pick_marker_target_id, str) and active_pick_marker_target_id.strip():
+                    marker_target_id = str(active_pick_marker_target_id)
+                    if marker_target_id not in picked_marker_target_ids:
+                        picked_marker_target_ids.append(marker_target_id)
                 claimed_target_id = (
                     str(active_pick_claim_target_id)
                     if isinstance(active_pick_claim_target_id, str) and active_pick_claim_target_id.strip()
@@ -2126,14 +2244,14 @@ def handle_command(cmd_str: str, source: str) -> None:
                         "event": "pick_slot_claimed",
                         "module": "CONTROL",
                         "selected_target_id": str(placed_target_id),
+                        "picked_marker_target_ids": list(picked_marker_target_ids),
                         "claimed_target_id": str(claimed_target_id),
                         "claim_radius_mm": float(getattr(cfg, "VISION_PICK_SLOT_CLAIM_RADIUS_MM", 70.0)),
                         "placed_pick_target_ids": list(placed_pick_target_ids),
                     },
                 )
                 _write_vision_assist_state()
-            active_pick_target_id = None
-            active_pick_claim_target_id = None
+            _clear_active_pick_targets()
             current_stack_level += 1
             current_pick_index += 1
             _set_pending_commit(current_stack_level, time.monotonic() + 5.0)
@@ -2195,10 +2313,9 @@ def handle_command(cmd_str: str, source: str) -> None:
                         STATE = auto_result.next_state
                         my_token = current_session_token
                         try:
-                            pick_target_id = _resolve_pick_target_for_cycle()
+                            pick_target_id, pick_mode_override = _resolve_pick_target_for_cycle()
                         except RuntimeError as e:
-                            active_pick_target_id = None
-                            active_pick_claim_target_id = None
+                            _clear_active_pick_targets()
                             if VISION_MODE_ENABLED:
                                 warn(module, f"[VISION] pick target unavailable: {e}")
                                 _send_line_to_unity("VISION_STATUS FAIL")
@@ -2206,8 +2323,17 @@ def handle_command(cmd_str: str, source: str) -> None:
                                 info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick target unavailable)")
                                 return
                             raise
-                        active_pick_target_id = pick_target_id
-                        active_pick_claim_target_id = _nearest_pick_slot_claim(pick_target_id)
+                        _set_active_pick_targets(pick_target_id, pick_mode_override)
+                        if str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).strip().lower() == "vision":
+                            console_info(
+                                "CONTROL",
+                                (
+                                    f"[VISION] selected_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}"
+                                    if pick_mode_override is None
+                                    else f"[VISION] deterministic_fallback_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}"
+                                ),
+                                essential=True,
+                            )
                         handles.combo_active = combo_active
                         vision_controller.log_pick_tracking(
                             target_id=pick_target_id,
@@ -2215,17 +2341,50 @@ def handle_command(cmd_str: str, source: str) -> None:
                             debug_enabled=_is_debug_enabled(),
                         )
                         try:
-                            actions.execute_pick_sequence(handles, pick_target_id, current_stack_level)
+                            actions.execute_pick_sequence(
+                                handles,
+                                pick_target_id,
+                                current_stack_level,
+                                pick_mode_override=pick_mode_override,
+                            )
                         except actions.PickPoseUnavailableError as e:
-                            active_pick_target_id = None
-                            active_pick_claim_target_id = None
+                            _clear_active_pick_targets()
                             if VISION_MODE_ENABLED:
-                                warn(module, f"[VISION] pick pose unavailable: {e.reason}")
-                                _send_line_to_unity("VISION_STATUS FAIL")
-                                STATE = State.WAITING_FOR_REPOSITION
-                                info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
-                                return
-                            raise
+                                fallback_target_id, pick_mode_override = _deterministic_remaining_pick_fallback_target(e.reason)
+                                if fallback_target_id is None:
+                                    warn(module, f"[VISION] pick pose unavailable: {e.reason}")
+                                    _send_line_to_unity("VISION_STATUS FAIL")
+                                    STATE = State.WAITING_FOR_REPOSITION
+                                    info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
+                                    return
+                                pick_target_id = fallback_target_id
+                                _set_active_pick_targets(pick_target_id, pick_mode_override)
+                                console_info(
+                                    "CONTROL",
+                                    f"[VISION] deterministic_fallback_source={pick_target_id} claimed_pick_slot={active_pick_claim_target_id}",
+                                    essential=True,
+                                )
+                                handles.combo_active = combo_active
+                                vision_controller.log_pick_tracking(
+                                    target_id=pick_target_id,
+                                    stack_level=current_stack_level,
+                                    debug_enabled=_is_debug_enabled(),
+                                )
+                                try:
+                                    actions.execute_pick_sequence(
+                                        handles,
+                                        pick_target_id,
+                                        current_stack_level,
+                                        pick_mode_override=pick_mode_override,
+                                    )
+                                except actions.PickPoseUnavailableError as fallback_error:
+                                    warn(module, f"[VISION] pick pose unavailable: {e.reason}->deterministic_fallback:{fallback_error.reason}")
+                                    _send_line_to_unity("VISION_STATUS FAIL")
+                                    STATE = State.WAITING_FOR_REPOSITION
+                                    info(module, "[SM] -> WAITING_FOR_REPOSITION (VISION pick unavailable)")
+                                    return
+                            else:
+                                raise
                         try:
                             pick_pose = cfg.pick_target_pose(pick_target_id)
                             hover_pose = cfg.pick_target_hover_pose(pick_target_id)

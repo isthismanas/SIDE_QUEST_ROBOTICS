@@ -115,8 +115,8 @@ class PickPoseUnavailableError(RuntimeError):
         self.reason = reason
 
 
-def _active_pick_pose_provider() -> PickPoseProvider:
-    mode = str(getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower()
+def _active_pick_pose_provider(mode_override: Optional[str] = None) -> PickPoseProvider:
+    mode = str(mode_override if mode_override is not None else getattr(cfg, "PICK_POSE_MODE", "deterministic")).lower()
     if mode in {"vision", "experimental"}:
         return VisionPickPoseProvider()
     return DeterministicPickPoseProvider()
@@ -795,7 +795,12 @@ def execute_pick_pose(handles: SystemHandles, pick_pose: cfg_pose_type, stack_le
     )
 
 
-def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_level: int) -> None:
+def execute_pick_sequence(
+    handles: SystemHandles,
+    pick_target_id: str,
+    stack_level: int,
+    pick_mode_override: Optional[str] = None,
+) -> None:
     """
     Deterministic pick sequence with hybrid strategy.
     - MovJ to hover zone (joint motion, faster)
@@ -808,7 +813,7 @@ def execute_pick_sequence(handles: SystemHandles, pick_target_id: str, stack_lev
         pick_target_id: pickup target id (legacy: L4/R3..., plate: P1..P7)
         stack_level: 0-indexed build level used for neutral gateway selection
     """
-    provider = _active_pick_pose_provider()
+    provider = _active_pick_pose_provider(mode_override=pick_mode_override)
     pick_pose, reason = provider.get_pick_pose(pick_target_id)
     if pick_pose is None:
         raise PickPoseUnavailableError(reason)

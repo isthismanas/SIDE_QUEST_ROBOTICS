@@ -67,12 +67,19 @@ def _load_state(path: str) -> dict[str, object]:
         return json.load(handle)
 
 
-def _remaining_targets_from_state(state: dict[str, object]) -> list[str]:
-    claimed = {
+def _claimed_slots_from_state(state: dict[str, object]) -> list[str]:
+    raw_claimed = state.get("claimed_pick_slot_ids")
+    if raw_claimed is None:
+        raw_claimed = state.get("placed_pick_target_ids", [])
+    return [
         str(target).strip().upper()
-        for target in state.get("placed_pick_target_ids", [])
+        for target in raw_claimed
         if str(target).strip()
-    }
+    ]
+
+
+def _remaining_targets_from_state(state: dict[str, object]) -> list[str]:
+    claimed = set(_claimed_slots_from_state(state))
     ordered_targets = [str(target).strip().upper() for target in getattr(cfg, "PICK_SEQUENCE", [])]
     remaining = [target for target in ordered_targets if target not in claimed]
 
@@ -104,7 +111,8 @@ def main() -> int:
     if args.max_count is not None:
         remaining_targets = remaining_targets[: max(0, int(args.max_count))]
 
-    claimed_count = len(state.get("placed_pick_target_ids", []))
+    claimed_slots = _claimed_slots_from_state(state)
+    claimed_count = len(claimed_slots)
     place_level_start = int(args.place_level_start) if args.place_level_start is not None else claimed_count
 
     participant_name = str(state.get("participant_name") or "deterministic_remaining_pick_place").strip()
@@ -118,14 +126,14 @@ def main() -> int:
     )
 
     print(f"[DET_FALLBACK] state_json={args.state_json}")
-    print(f"[DET_FALLBACK] claimed_slots={state.get('placed_pick_target_ids', [])}")
+    print(f"[DET_FALLBACK] claimed_slots={claimed_slots}")
     print(f"[DET_FALLBACK] remaining_targets={remaining_targets}")
     print(f"[DET_FALLBACK] place_level_start={place_level_start} execute={bool(args.execute)}")
 
     _write_event(
         "deterministic_remaining_plan",
         state_json=os.path.abspath(str(args.state_json)),
-        claimed_slots=state.get("placed_pick_target_ids", []),
+        claimed_slots=claimed_slots,
         remaining_targets=remaining_targets,
         place_level_start=place_level_start,
         execute=bool(args.execute),
