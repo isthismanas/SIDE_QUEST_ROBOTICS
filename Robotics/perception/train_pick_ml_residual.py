@@ -515,8 +515,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-log-target-distance-mm",
         type=float,
-        default=12.0,
-        help="Only accept a log-derived target label when its resolved target is within this distance threshold.",
+        default=3.0,
+        help="Only accept a log-derived target label when its resolved target is within this distance threshold of a hardcoded pickup slot.",
     )
     parser.add_argument(
         "--use-runtime-residual-samples",
@@ -534,8 +534,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-runtime-expected-residual-mm",
         type=float,
-        default=8.0,
-        help="Only trust runtime residual samples when the live TCP XY stayed within this distance of the expected P target.",
+        default=3.0,
+        help="Only trust runtime residual samples when the live TCP XY stayed within this distance of the expected hardcoded P target.",
     )
     parser.add_argument("--knn-k", type=int, default=2, help="Number of neighbors to use for residual prediction.")
     parser.add_argument(

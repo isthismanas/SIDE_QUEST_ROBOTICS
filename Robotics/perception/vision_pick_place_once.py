@@ -336,6 +336,7 @@ def _plan_cycle(
         float(median_pose["x_m"]),
         float(median_pose["y_m"]),
         camera_pose=median_pose,
+        target_id=target_id,
     )
     if projection_details is None:
         raise RuntimeError(f"camera_xy_to_robot_xy_mm failed: {reason}")
