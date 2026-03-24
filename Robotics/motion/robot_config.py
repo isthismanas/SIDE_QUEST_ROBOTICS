@@ -23,6 +23,12 @@ RUN_MODE = "DEBUG"
 # LOG_LEVEL sets the default logging level for all modules.
 # LOG_MODULES defines per-module overrides; module-level values supersede LOG_LEVEL.
 # Allowed levels: "DEBUG", "INFO", "WARN", "ERROR", "QUIET"
+# ----------------------------
+# Voice AI Configuration
+# ----------------------------
+COMM_MODE = "voice"               # "default" for Unity Buttons, "voice" for Standalone Microphone
+VOICE_CONFIDENCE_THRESHOLD = 0.65 # Require 65% match from Whisper (fallback to Facilitator otherwise)
+VOICE_NUDGE_MM = 10.0             # Step size for voice directional nudges
 LOG_LEVEL = "INFO"
 LOG_MODULES = {
     "DOBOT": "WARN",
