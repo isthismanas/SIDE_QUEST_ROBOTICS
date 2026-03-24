@@ -1,6 +1,6 @@
 {
   "model_type": "pick_residual_knn_v1",
-  "generated_at_utc": "2026-03-21T10:14:32.448981+00:00",
+  "generated_at_utc": "2026-03-24T04:29:03.891054+00:00",
   "source_calibration_jsonl": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/calibration_data/pick_plane_marker13_20260321_retry.jsonl",
   "source_log_confirmation_jsonl": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
   "source_runtime_residual_jsonl": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/pickup_runtime_residual.jsonl",
@@ -22,32 +22,32 @@
     "camera_yaw_rad"
   ],
   "feature_mean": [
-    0.10950188346615335,
-    -0.035114667721698654,
-    0.5332758840528586,
-    0.01472943402311762,
-    -0.6717486624575896
+    0.115832304326304,
+    -0.02717804070273396,
+    0.5350276693915056,
+    0.024849677825800442,
+    -0.7547193299630105
   ],
   "feature_scale": [
-    0.07173425061824039,
-    0.08817188594044079,
-    0.009595799111244686,
-    0.1543446024466924,
-    0.9456233131018467
+    0.0654829869806015,
+    0.07974964044625539,
+    0.009879564235720152,
+    0.17201029036370988,
+    1.3225030745372437
   ],
   "knn_k": 2,
   "max_neighbor_distance": 1.5,
   "max_correction_norm_mm": 8.0,
   "weight_power": 2.0,
   "metrics": {
-    "sample_count": 26,
+    "sample_count": 41,
     "calibration_sample_count": 18,
-    "log_confirmation_sample_count": 7,
+    "log_confirmation_sample_count": 22,
     "runtime_residual_sample_count": 1,
-    "base_rmse_total_mm": 3.6262785933605124,
-    "train_rmse_total_mm": 0.09389854035997112,
-    "loo_rmse_total_mm": 3.5792993370926363,
-    "loo_available_count": 17
+    "base_rmse_total_mm": 4.086571149336404,
+    "train_rmse_total_mm": 0.5589217380204851,
+    "loo_rmse_total_mm": 3.769701319741053,
+    "loo_available_count": 32
   },
   "samples": [
     {
@@ -82,12 +82,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 404.2777000000021,
-        "y": -67.44019999999931
+        "x": 404.27770000005836,
+        "y": -67.44019999994846
       },
       "loo_predicted_xy_mm": {
-        "x": 408.1726650823055,
-        "y": -67.04720189528227
+        "x": 407.8943537935377,
+        "y": -64.31474851665524
       }
     },
     {
@@ -122,12 +122,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 322.1816000000016,
-        "y": -67.44050000000361
+        "x": 322.1816000000014,
+        "y": -67.44050000000315
       },
       "loo_predicted_xy_mm": {
-        "x": 323.41254371168753,
-        "y": -68.5832401152595
+        "x": 323.41184976910387,
+        "y": -68.62390202428973
       }
     },
     {
@@ -163,7 +163,7 @@
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
         "x": 362.3365999999998,
-        "y": -13.453199999999335
+        "y": -13.45319999999933
       },
       "loo_predicted_xy_mm": {
         "x": 360.7451919092672,
@@ -203,11 +203,11 @@
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
         "x": 278.4949999999999,
-        "y": -13.45329999999924
+        "y": -13.453299999999096
       },
       "loo_predicted_xy_mm": {
-        "x": 278.44374203492254,
-        "y": -14.670505805661215
+        "x": 278.4447863355786,
+        "y": -14.397408847465858
       }
     },
     {
@@ -242,8 +242,8 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 403.9617772327152,
-        "y": 41.34141736289973
+        "x": 403.96177723271455,
+        "y": 41.341417362899904
       },
       "loo_predicted_xy_mm": {
         "x": 406.20872633696075,
@@ -283,7 +283,7 @@
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
         "x": 323.18320000000017,
-        "y": 38.175399999999335
+        "y": 38.17539999999933
       },
       "loo_predicted_xy_mm": {
         "x": 321.976234416511,
@@ -322,12 +322,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 238.81959999999913,
-        "y": 36.92640000000289
+        "x": 238.81960000000026,
+        "y": 36.926399999999745
       },
       "loo_predicted_xy_mm": {
-        "x": 236.4631850210431,
-        "y": 39.98634646287246
+        "x": 238.14251327082496,
+        "y": 39.83201537410759
       }
     },
     {
@@ -362,8 +362,8 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 195.57830000000092,
-        "y": -15.311100000000934
+        "x": 195.57830000000095,
+        "y": -15.311100000000948
       },
       "loo_predicted_xy_mm": {
         "x": 197.27927637003575,
@@ -402,12 +402,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 198.20780000000144,
-        "y": -93.17870000000094
+        "x": 198.20780000000136,
+        "y": -93.17870000000087
       },
       "loo_predicted_xy_mm": {
-        "x": 198.80716760075669,
-        "y": -93.22823216093877
+        "x": 198.78731511581535,
+        "y": -93.20496456194144
       }
     },
     {
@@ -442,12 +442,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 162.13079999999854,
-        "y": -132.77869999999905
+        "x": 162.13079999999863,
+        "y": -132.7786999999991
       },
       "loo_predicted_xy_mm": {
-        "x": 160.18180507966306,
-        "y": -132.2325444929183
+        "x": 160.16863468604018,
+        "y": -132.2372978767199
       }
     },
     {
@@ -482,8 +482,8 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 153.1308000000007,
-        "y": 67.71740000000031
+        "x": 153.130800000001,
+        "y": 67.71739999999998
       },
       "loo_predicted_xy_mm": {
         "x": 155.5262100529606,
@@ -522,12 +522,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 436.4274000000006,
-        "y": 69.29439999999738
+        "x": 436.4274000000005,
+        "y": 69.29439999999771
       },
       "loo_predicted_xy_mm": {
-        "x": 436.20373573924985,
-        "y": 66.77469108092976
+        "x": 437.27793534028086,
+        "y": 67.56665099088877
       }
     },
     {
@@ -562,12 +562,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 421.8931999999979,
+        "x": 421.89319999999793,
         "y": -130.83900000000068
       },
       "loo_predicted_xy_mm": {
-        "x": 419.23752722092377,
-        "y": -132.39499783443026
+        "x": 419.6322962711798,
+        "y": -130.58671985620083
       }
     },
     {
@@ -603,11 +603,11 @@
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
         "x": 340.72649999999913,
-        "y": -132.41129999999836
+        "y": -132.4112999999984
       },
       "loo_predicted_xy_mm": {
-        "x": 338.1507446670785,
-        "y": -130.55352719621263
+        "x": 338.20670609938924,
+        "y": -130.49241063509953
       }
     },
     {
@@ -642,12 +642,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 238.79320000000084,
-        "y": -134.77689999999788
+        "x": 238.79320000000072,
+        "y": -134.77689999999816
       },
       "loo_predicted_xy_mm": {
-        "x": 240.42919006003575,
-        "y": -132.21788896620257
+        "x": 240.43592041120095,
+        "y": -132.2207646907949
       }
     },
     {
@@ -682,12 +682,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 362.0485999999994,
-        "y": 68.70000000000262
+        "x": 362.04860000000036,
+        "y": 68.70000000000316
       },
       "loo_predicted_xy_mm": {
-        "x": 361.7747226342437,
-        "y": 70.63513538853577
+        "x": 361.93872529942,
+        "y": 71.8576401779079
       }
     },
     {
@@ -722,12 +722,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 259.5618000000013,
-        "y": -64.64120000000055
+        "x": 259.5618000000014,
+        "y": -64.6412000000006
       },
       "loo_predicted_xy_mm": {
-        "x": 259.81798515184045,
-        "y": -66.06024664766548
+        "x": 260.7367163104903,
+        "y": -63.89033180540737
       }
     },
     {
@@ -762,12 +762,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 259.0618000000001,
-        "y": -64.47429999999467
+        "x": 259.06180000000006,
+        "y": -64.47429999999532
       },
       "loo_predicted_xy_mm": {
-        "x": 259.10066554072546,
-        "y": -60.7960974573391
+        "x": 258.54136365747974,
+        "y": -62.4024052756193
       }
     },
     {
@@ -806,8 +806,8 @@
         "y": -67.4403
       },
       "loo_predicted_xy_mm": {
-        "x": 404.2776999999996,
-        "y": -67.44030000000016
+        "x": 404.2776999999994,
+        "y": -67.44029999999997
       }
     },
     {
@@ -842,12 +842,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 322.18180000000075,
-        "y": -67.44029999999921
+        "x": 322.1817999999964,
+        "y": -67.44029999997124
       },
       "loo_predicted_xy_mm": {
-        "x": 323.1137734011008,
-        "y": -66.39915359124453
+        "x": 321.7962135246851,
+        "y": -64.61958947124855
       }
     },
     {
@@ -882,8 +882,8 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 403.82730000000095,
-        "y": 40.881899999999774
+        "x": 403.82730000000123,
+        "y": 40.881899999999696
       },
       "loo_predicted_xy_mm": {
         "x": 403.7640323372516,
@@ -923,11 +923,11 @@
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
         "x": 278.4949000000001,
-        "y": -13.453200000000761
+        "y": -13.453200000000905
       },
       "loo_predicted_xy_mm": {
-        "x": 278.51781036750737,
-        "y": -15.105048380217966
+        "x": 278.5214749958439,
+        "y": -14.890317669695655
       }
     },
     {
@@ -962,12 +962,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 362.33669999999927,
-        "y": -13.453200000000788
+        "x": 362.336699999999,
+        "y": -13.453199999999295
       },
       "loo_predicted_xy_mm": {
-        "x": 362.0291069240529,
-        "y": -16.96890977161399
+        "x": 360.63987684859217,
+        "y": -13.526278095060846
       }
     },
     {
@@ -1002,12 +1002,12 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 323.18309999999906,
-        "y": 38.17550000000052
+        "x": 323.18309999999843,
+        "y": 38.17550000000435
       },
       "loo_predicted_xy_mm": {
-        "x": 317.50837040902934,
-        "y": 42.756892409013574
+        "x": 320.54660510898213,
+        "y": 42.720611462837894
       }
     },
     {
@@ -1042,12 +1042,612 @@
       "runtime_tcp_xy_mm": null,
       "runtime_residual_to_expected_mm": null,
       "train_predicted_xy_mm": {
-        "x": 238.81949999999986,
-        "y": 36.92640000000015
+        "x": 238.81949999999824,
+        "y": 36.92640000000618
       },
       "loo_predicted_xy_mm": {
-        "x": 235.9136826334988,
-        "y": 40.553734342672755
+        "x": 237.048972637538,
+        "y": 43.11849588597527
+      }
+    },
+    {
+      "sample_label": "log_f38d6ed4be75492ea71cffea5863746b_cycle0",
+      "marker_id": 13,
+      "features": [
+        0.06623372961477153,
+        0.06555804898712705,
+        0.5356599816852595,
+        0.020514426091767134,
+        2.3039621954938183
+      ],
+      "base_xy_mm": {
+        "x": 406.590108307575,
+        "y": -68.40610383964392
+      },
+      "actual_xy_mm": {
+        "x": 404.2777,
+        "y": -67.4403
+      },
+      "residual_xy_mm": {
+        "x": -2.3124083075750264,
+        "y": 0.9658038396439252,
+        "norm": 2.5059946603320897
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P1",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 404.2777000000005,
+        "y": -67.44029999999833
+      },
+      "loo_predicted_xy_mm": {
+        "x": 405.3176639261721,
+        "y": -65.88960802568394
+      }
+    },
+    {
+      "sample_label": "log_f38d6ed4be75492ea71cffea5863746b_cycle1",
+      "marker_id": 11,
+      "features": [
+        0.061264190853794954,
+        -0.02317993881944257,
+        0.5276654998002687,
+        -0.054856201289808885,
+        -2.393883927056593
+      ],
+      "base_xy_mm": {
+        "x": 323.37227397502767,
+        "y": -72.70964510571608
+      },
+      "actual_xy_mm": {
+        "x": 322.1818,
+        "y": -67.4403
+      },
+      "residual_xy_mm": {
+        "x": -1.1904739750276576,
+        "y": 5.269345105716084,
+        "norm": 5.402150139375266
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P2",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 322.18180000000365,
+        "y": -67.44030000002874
+      },
+      "loo_predicted_xy_mm": {
+        "x": 322.49709804330587,
+        "y": -70.14376435499993
+      }
+    },
+    {
+      "sample_label": "log_f38d6ed4be75492ea71cffea5863746b_cycle2",
+      "marker_id": 12,
+      "features": [
+        0.18278583406813861,
+        0.06296953725917119,
+        0.5427270132121684,
+        0.082471015533461,
+        -0.8597563537176508
+      ],
+      "base_xy_mm": {
+        "x": 401.8473769442238,
+        "y": 40.078470883556435
+      },
+      "actual_xy_mm": {
+        "x": 403.8273,
+        "y": 40.8819
+      },
+      "residual_xy_mm": {
+        "x": 1.979923055776169,
+        "y": 0.8034291164435672,
+        "norm": 2.1367249827582713
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P5",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 403.82729999999964,
+        "y": 40.88189999999684
+      },
+      "loo_predicted_xy_mm": {
+        "x": 403.22812495387,
+        "y": 38.66052799145998
+      }
+    },
+    {
+      "sample_label": "log_f38d6ed4be75492ea71cffea5863746b_cycle3",
+      "marker_id": 16,
+      "features": [
+        0.1207648849985798,
+        0.016976790460645323,
+        0.5349901743274084,
+        0.08887828871112285,
+        0.8451184763561379
+      ],
+      "base_xy_mm": {
+        "x": 359.8950967645143,
+        "y": -17.477813560317998
+      },
+      "actual_xy_mm": {
+        "x": 362.3367,
+        "y": -13.4532
+      },
+      "residual_xy_mm": {
+        "x": 2.4416032354857293,
+        "y": 4.024613560317997,
+        "norm": 4.707328400423099
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P3",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 362.33669999999853,
+        "y": -13.453200000001322
+      },
+      "loo_predicted_xy_mm": {
+        "x": 359.8950967645143,
+        "y": -17.477813560317998
+      }
+    },
+    {
+      "sample_label": "log_f38d6ed4be75492ea71cffea5863746b_cycle4",
+      "marker_id": 15,
+      "features": [
+        0.12113688504076302,
+        -0.07068188644882983,
+        0.5370398993439721,
+        -0.07038347984859387,
+        -2.383238258930975
+      ],
+      "base_xy_mm": {
+        "x": 277.58465652268615,
+        "y": -16.813889577799188
+      },
+      "actual_xy_mm": {
+        "x": 278.4949,
+        "y": -13.4532
+      },
+      "residual_xy_mm": {
+        "x": 0.910243477313827,
+        "y": 3.360689577799187,
+        "norm": 3.4817779404092453
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P4",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 278.49490000000145,
+        "y": -13.453200000005092
+      },
+      "loo_predicted_xy_mm": {
+        "x": 279.6845149984272,
+        "y": -17.625472907949256
+      }
+    },
+    {
+      "sample_label": "log_f38d6ed4be75492ea71cffea5863746b_cycle5",
+      "marker_id": 14,
+      "features": [
+        0.1771476749413289,
+        -0.025105701985816124,
+        0.528230637993008,
+        -0.3564505303748718,
+        -2.27502308245202
+      ],
+      "base_xy_mm": {
+        "x": 319.2650649971146,
+        "y": 35.15024177264772
+      },
+      "actual_xy_mm": {
+        "x": 323.1831,
+        "y": 38.1755
+      },
+      "residual_xy_mm": {
+        "x": 3.9180350028854036,
+        "y": 3.025258227352282,
+        "norm": 4.950069254666837
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P6",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 323.1830999999985,
+        "y": 38.175500000000454
+      },
+      "loo_predicted_xy_mm": {
+        "x": 320.1827687664801,
+        "y": 38.358268462647736
+      }
+    },
+    {
+      "sample_label": "log_f38d6ed4be75492ea71cffea5863746b_cycle6",
+      "marker_id": 17,
+      "features": [
+        0.18817417362391461,
+        -0.11848413228925628,
+        0.5596691397597136,
+        -0.03104588772874355,
+        -2.406956987194869
+      ],
+      "base_xy_mm": {
+        "x": 231.37294398540286,
+        "y": 45.751051522187595
+      },
+      "actual_xy_mm": {
+        "x": 238.8195,
+        "y": 36.9264
+      },
+      "residual_xy_mm": {
+        "x": 7.446556014597149,
+        "y": -8.824651522187594,
+        "norm": 11.54667358881253
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P7",
+      "actual_target_reason": "source_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 236.53221757693257,
+        "y": 39.63697792042714
+      },
+      "loo_predicted_xy_mm": {
+        "x": 231.37294398540286,
+        "y": 45.751051522187595
+      }
+    },
+    {
+      "sample_label": "log_943a7a6bd0594d53bc58dd537178bc31_cycle0",
+      "marker_id": 17,
+      "features": [
+        0.18533445722191919,
+        -0.022778796936615886,
+        0.5475556331088676,
+        0.02585325874030551,
+        -2.436663040607376
+      ],
+      "base_xy_mm": {
+        "x": 321.28738090453436,
+        "y": 42.76125709558477
+      },
+      "actual_xy_mm": {
+        "x": 323.1831,
+        "y": 38.1755
+      },
+      "residual_xy_mm": {
+        "x": 1.8957190954656653,
+        "y": -4.585757095584768,
+        "norm": 4.96214863024267
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P6",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 323.1831000000007,
+        "y": 38.1755000000032
+      },
+      "loo_predicted_xy_mm": {
+        "x": 324.25234228181785,
+        "y": 41.72118122768168
+      }
+    },
+    {
+      "sample_label": "log_943a7a6bd0594d53bc58dd537178bc31_cycle1",
+      "marker_id": 11,
+      "features": [
+        0.06212254253705812,
+        -0.022950596504915342,
+        0.5246446307634138,
+        0.10883630381987355,
+        -2.421532348248729
+      ],
+      "base_xy_mm": {
+        "x": 323.57057482468815,
+        "y": -71.911607302858
+      },
+      "actual_xy_mm": {
+        "x": 322.1818,
+        "y": -67.4403
+      },
+      "residual_xy_mm": {
+        "x": -1.3887748246881415,
+        "y": 4.471307302858008,
+        "norm": 4.682017141177394
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P2",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 322.1818000000006,
+        "y": -67.44030000000214
+      },
+      "loo_predicted_xy_mm": {
+        "x": 322.5658762887038,
+        "y": -68.10778739103093
+      }
+    },
+    {
+      "sample_label": "log_2f6188f08f3d486f96917b1bf1cde746_cycle0",
+      "marker_id": 13,
+      "features": [
+        0.06276160771999728,
+        -0.022915387491891683,
+        0.528907689664782,
+        0.05544367833952834,
+        2.380502764407887
+      ],
+      "base_xy_mm": {
+        "x": 323.59095378669633,
+        "y": -71.31695612601375
+      },
+      "actual_xy_mm": {
+        "x": 322.1818,
+        "y": -67.4403
+      },
+      "residual_xy_mm": {
+        "x": -1.4091537866963222,
+        "y": 3.8766561260137564,
+        "norm": 4.124824494923459
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P2",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 322.1817999999995,
+        "y": -67.44030000000166
+      },
+      "loo_predicted_xy_mm": {
+        "x": 323.10416640364423,
+        "y": -69.17651756375378
+      }
+    },
+    {
+      "sample_label": "log_2f6188f08f3d486f96917b1bf1cde746_cycle1",
+      "marker_id": 15,
+      "features": [
+        0.1242707094236184,
+        0.016449634552455104,
+        0.540432245330276,
+        0.059055560375440616,
+        -2.381699055749262
+      ],
+      "base_xy_mm": {
+        "x": 359.3305933268675,
+        "y": -14.21302768909716
+      },
+      "actual_xy_mm": {
+        "x": 362.3367,
+        "y": -13.4532
+      },
+      "residual_xy_mm": {
+        "x": 3.0061066731325354,
+        "y": 0.7598276890971594,
+        "norm": 3.1006475851619593
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P3",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 362.3366999999993,
+        "y": -13.4532000000032
+      },
+      "loo_predicted_xy_mm": {
+        "x": 360.7626840297993,
+        "y": -15.060287119517637
+      }
+    },
+    {
+      "sample_label": "log_2f6188f08f3d486f96917b1bf1cde746_cycle2",
+      "marker_id": 12,
+      "features": [
+        0.06373200517105282,
+        0.06244912280305695,
+        0.533951044035344,
+        0.11946722410781042,
+        -0.7677857036625547
+      ],
+      "base_xy_mm": {
+        "x": 403.7207595376181,
+        "y": -70.72319424636756
+      },
+      "actual_xy_mm": {
+        "x": 404.2777,
+        "y": -67.4403
+      },
+      "residual_xy_mm": {
+        "x": 0.5569404623818741,
+        "y": 3.2828942463675617,
+        "norm": 3.329801392196144
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P1",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 404.2776999999416,
+        "y": -67.44030000005154
+      },
+      "loo_predicted_xy_mm": {
+        "x": 400.79549666825426,
+        "y": -70.58177760572751
+      }
+    },
+    {
+      "sample_label": "log_2f6188f08f3d486f96917b1bf1cde746_cycle3",
+      "marker_id": 16,
+      "features": [
+        0.12364557283479287,
+        -0.07355106469463357,
+        0.5460248474125977,
+        0.0647396318013802,
+        0.7315017697939704
+      ],
+      "base_xy_mm": {
+        "x": 274.84100251698413,
+        "y": -14.468651810596313
+      },
+      "actual_xy_mm": {
+        "x": 278.4949,
+        "y": -13.4532
+      },
+      "residual_xy_mm": {
+        "x": 3.6538974830158395,
+        "y": 1.0154518105963124,
+        "norm": 3.7923751391486595
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P4",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 278.49490000000156,
+        "y": -13.453200000004347
+      },
+      "loo_predicted_xy_mm": {
+        "x": 279.4351865871128,
+        "y": -16.173824678506936
+      }
+    },
+    {
+      "sample_label": "log_2f6188f08f3d486f96917b1bf1cde746_cycle4",
+      "marker_id": 11,
+      "features": [
+        0.17653184490652724,
+        -0.11216809786525476,
+        0.5314055247396146,
+        -0.11766495165150065,
+        -2.391149280573431
+      ],
+      "base_xy_mm": {
+        "x": 237.53407357675513,
+        "y": 34.89262992225605
+      },
+      "actual_xy_mm": {
+        "x": 238.8195,
+        "y": 36.9264
+      },
+      "residual_xy_mm": {
+        "x": 1.2854264232448713,
+        "y": 2.0337700777439522,
+        "norm": 2.405938864290351
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P7",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 238.81950000000177,
+        "y": 36.92639999999382
+      },
+      "loo_predicted_xy_mm": {
+        "x": 239.64632930399023,
+        "y": 34.044159217560996
+      }
+    },
+    {
+      "sample_label": "log_2f6188f08f3d486f96917b1bf1cde746_cycle5",
+      "marker_id": 14,
+      "features": [
+        0.18616939430221963,
+        0.0660941609262729,
+        0.5520574985007048,
+        0.641013169629589,
+        0.978575527555545
+      ],
+      "base_xy_mm": {
+        "x": 404.7139687124117,
+        "y": 43.216230098903964
+      },
+      "actual_xy_mm": {
+        "x": 403.8273,
+        "y": 40.8819
+      },
+      "residual_xy_mm": {
+        "x": -0.8866687124117334,
+        "y": -2.334330098903962,
+        "norm": 2.497053947398586
+      },
+      "sample_source": "log_confirmation",
+      "sample_source_path": "/home/albert/SIDE_QUEST_ROBOTICS/Robotics/perception/logs/grab_pick.jsonl",
+      "actual_target_id": "P5",
+      "actual_target_reason": "nearest_delta",
+      "participant_name": "vision_pick_place_once",
+      "source_event": "vision_pick_place_plan",
+      "runtime_tcp_xy_mm": null,
+      "runtime_residual_to_expected_mm": null,
+      "train_predicted_xy_mm": {
+        "x": 403.8273000000002,
+        "y": 40.88190000000059
+      },
+      "loo_predicted_xy_mm": {
+        "x": 404.7139687124117,
+        "y": 43.216230098903964
       }
     },
     {
@@ -1093,8 +1693,8 @@
         "y": -67.4403
       },
       "loo_predicted_xy_mm": {
-        "x": 404.2776999999996,
-        "y": -67.44030000000016
+        "x": 404.2776999999994,
+        "y": -67.44029999999997
       }
     }
   ]
