@@ -8,11 +8,18 @@ import cv2
 import depthai as dai
 import numpy as np
 
+import robot_config as cfg
+
 
 JPEG_QUALITY = 40
 STREAM_WIDTH = 1280
 STREAM_HEIGHT = 720
 STREAM_FPS = 20
+
+
+def _cam_info(label: str, message: str) -> None:
+    if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+        print(f"[CAM] [{label}] {message}")
 
 
 def _create_node(pipeline, node_name: str):
@@ -176,7 +183,7 @@ def _configure_perception(device, raw_queue, perc_engine, label: str) -> None:
         )
         perc_engine.update_intrinsics(camera_matrix, dist_coeffs)
         perc_engine.start_worker(raw_queue, None)
-        print(f"[CAM] [{label}] Perception worker attached to uncompressed feed.")
+        _cam_info(label, "Perception worker attached to uncompressed feed.")
     except Exception as e:
         print(f"[CAM] [{label}] Perception spawn failed: {e}")
 
@@ -193,7 +200,7 @@ def _serve_socket_loop(server: socket.socket, stop_event, label: str, stream_fra
             raise
 
         conn.settimeout(1.0)
-        print(f"[CAM] [{label}] Unity joined stream from {addr}")
+        _cam_info(label, f"Unity joined stream from {addr}")
 
         try:
             while not stop_event.is_set():
@@ -216,7 +223,7 @@ def _run_v2_server(device_info, matched_id: str, port: int, label: str, enable_r
         except Exception:
             pass
 
-        print(f"[CAM] [{label}] Camera Connected using id {matched_id}.")
+        _cam_info(label, f"Camera Connected using id {matched_id}.")
         q = device.getOutputQueue("out", maxSize=4, blocking=False)
 
         if enable_rawL and perc_engine is not None:
@@ -229,7 +236,7 @@ def _run_v2_server(device_info, matched_id: str, port: int, label: str, enable_r
             server.bind(("0.0.0.0", port))
             server.listen(1)
             server.settimeout(1.0)
-            print(f"[CAM] [{label}] Streaming MJPEG to Unity on port {port}")
+            _cam_info(label, f"Streaming MJPEG to Unity on port {port}")
 
             def _stream_frames():
                 group = q.get()
@@ -265,7 +272,7 @@ def _run_v3_server(device_info, matched_id: str, port: int, label: str, enable_r
             raw_queue = left_raw_output.createOutputQueue()
 
         device = pipeline.getDefaultDevice()
-        print(f"[CAM] [{label}] Camera Connected using id {matched_id}.")
+        _cam_info(label, f"Camera Connected using id {matched_id}.")
 
         if enable_rawL and perc_engine is not None and raw_queue is not None:
             _configure_perception(device, raw_queue, perc_engine, label)
@@ -277,7 +284,7 @@ def _run_v3_server(device_info, matched_id: str, port: int, label: str, enable_r
             server.bind(("0.0.0.0", port))
             server.listen(1)
             server.settimeout(1.0)
-            print(f"[CAM] [{label}] Streaming MJPEG to Unity on port {port}")
+            _cam_info(label, f"Streaming MJPEG to Unity on port {port}")
 
             def _stream_frames():
                 left_frame = left_stream_queue.get().getCvFrame()
