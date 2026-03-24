@@ -1,22 +1,46 @@
 {
   "active_pick_claim_target_id": "P6",
-  "active_pick_target_id": "P5",
+  "active_pick_marker_target_id": "P3",
+  "active_pick_target_id": "P3",
+  "claimed_pick_slot_ids": [
+    "P3",
+    "P6"
+  ],
   "current_pick_index": 1,
   "current_stack_level": 1,
   "expected_workbench_brick_count": 7,
-  "participant_name": "AlbertT13",
+  "participant_name": "dfgh",
   "pick_mode": "vision",
-  "placed_pick_target_ids": [
+  "picked_marker_target_ids": [
     "P2",
+    "P3"
+  ],
+  "placed_pick_target_ids": [
+    "P3",
     "P6"
+  ],
+  "remaining_marker_targets": [
+    "P1",
+    "P4",
+    "P5",
+    "P6",
+    "P7"
+  ],
+  "remaining_pick_slots": [
+    "P1",
+    "P2",
+    "P4",
+    "P5",
+    "P7"
   ],
   "remaining_targets": [
     "P1",
-    "P3",
+    "P2",
     "P4",
+    "P5",
     "P7"
   ],
-  "run_id": "bc2f503c950a42118217da5734f4f5f1",
-  "session_id": "1774326543-af2d7c6f",
-  "ts_unix": 1774326574.4468362
+  "run_id": "9213b390ac1d4ba8bd897875446e07c7",
+  "session_id": "1774332076-d5d6a713",
+  "ts_unix": 1774332127.1089964
 }

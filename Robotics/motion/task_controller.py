@@ -862,7 +862,7 @@ def _handle_run_timeout() -> None:
     _last_ready_level_printed = None
     _clear_score_commit_state()
     _sync_json_log_context()
-    if _is_official_mode() and vr_connected:
+    if vr_connected:
         console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
 
 
@@ -897,7 +897,7 @@ def console_emit(
     level_u = str(level).strip().upper()
 
     if _is_console_quiet():
-        allow = (level_u in {"WARN", "ERROR", "FATAL"}) or (tag_u in QUIET_ALLOWLIST) or (allow_in_quiet and tag_u in QUIET_ALLOWLIST)
+        allow = (level_u in {"WARN", "ERROR", "FATAL"}) or (tag_u in QUIET_ALLOWLIST) or allow_in_quiet
         if not allow:
             return
         print(f"[{module}] {message}")
@@ -923,8 +923,6 @@ def console_info(module: str, message: str, essential: bool = False) -> None:
 
 def _emit_ready_prompt(level) -> None:
     global _last_ready_level_printed
-    if _is_console_quiet():
-        return
     if level == _last_ready_level_printed:
         return
     _last_ready_level_printed = level
@@ -1428,7 +1426,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         _last_ready_level_printed = None
         _clear_score_commit_state()
         _sync_json_log_context()
-        if _is_official_mode() and vr_connected:
+        if vr_connected:
             console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
         return
 
@@ -2573,8 +2571,7 @@ def command_server():
                             warn("CONTROL", f"[POSE_RAW] GetPose() probe failed: {e}")
                     finally:
                         _logged_raw_getpose_probe = True
-                if _is_official_mode():
-                    console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
+                console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
             except Exception as e:
                 robot_armed = False
                 warn("CONTROL", f"[CONTROL] Robot arm FAILED: {e}")
