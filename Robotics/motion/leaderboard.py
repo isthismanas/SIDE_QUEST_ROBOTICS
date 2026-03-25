@@ -271,6 +271,7 @@ def emit_run_summary(
     run_start_time,
     participant_name,
     current_stack_level,
+    quality_score: int = 0,
     end_time_mono=None,
 ) -> float:
     now_mono = end_time_mono if end_time_mono is not None else time.monotonic()
@@ -278,8 +279,9 @@ def emit_run_summary(
     duration_s = max(0.0, now_mono - start_ts)
     participant = participant_name.strip() if isinstance(participant_name, str) and participant_name.strip() else "UNKNOWN"
     placed = int(current_stack_level) if current_stack_level is not None else 0
+    quality = int(quality_score or 0)
     summary_reason = reason.strip().upper() if isinstance(reason, str) and reason.strip() else "UNKNOWN"
-    warn("STACK", f"{participant} successfully placed {placed} blocks in {duration_s:.1f} seconds ({summary_reason})")
+    warn("STACK", f"{participant} successfully placed {placed} blocks in {duration_s:.1f} seconds ({summary_reason}, quality={quality})")
     return duration_s
 
 
@@ -292,6 +294,10 @@ def finalize_run(
     participant_name,
     current_stack_level,
     run_start_time,
+    quality_score: int = 0,
+    green_count: int = 0,
+    yellow_count: int = 0,
+    red_count: int = 0,
     already_finalized: bool,
     end_time_mono=None,
 ) -> bool:
@@ -325,6 +331,10 @@ def finalize_run(
         "mode": mode,
         "event_id": event_id,
         "final_height": final_height,
+        "quality_score": int(quality_score or 0),
+        "green_count": int(green_count or 0),
+        "yellow_count": int(yellow_count or 0),
+        "red_count": int(red_count or 0),
         "target_height": target_height,
         "completion_time_s": round(completion_time_s, 3),
         "ended_at_unix": time.time(),
@@ -334,7 +344,7 @@ def finalize_run(
     try:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        info("STACK", f"[LEADERBOARD] Finalized run_id={finalized_run_id} state={ended_state} height={final_height}/{target_height} time={completion_time_s:.3f}s")
+        info("STACK", f"[LEADERBOARD] Finalized run_id={finalized_run_id} state={ended_state} height={final_height}/{target_height} quality={int(quality_score or 0)} time={completion_time_s:.3f}s")
         return True
     except Exception as e:
         warn("STACK", f"[LEADERBOARD] Failed to append leaderboard record: {e}")
@@ -542,10 +552,11 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             <table>
                 <thead>
                     <tr>
-                        <th style=\"width: 14%\">Rank</th>
-                        <th style=\"width: 46%\">Pilot Name</th>
-                        <th style=\"width: 20%\">Height</th>
-                        <th style=\"width: 20%\">Time</th>
+                        <th style=\"width: 12%\">Rank</th>
+                        <th style=\"width: 38%\">Pilot Name</th>
+                        <th style=\"width: 16%\">Height</th>
+                        <th style=\"width: 16%\">Time</th>
+                        <th style=\"width: 18%\">Quality Score</th>
                     </tr>
                 </thead>
                 <tbody id=\"rows\"></tbody>
@@ -610,10 +621,11 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
                     const rank = row.rank ?? '--';
                     const name = (row.participant_name && String(row.participant_name).trim()) || 'UNKNOWN';
                     const height = row.final_height ?? '--';
+                    const qualityScore = row.quality_score ?? 0;
                     const time = fmtTime(row.completion_time_s);
-                    html += `<tr><td>${rank}</td><td>${name}</td><td>${height}</td><td>${time}</td></tr>`;
+                    html += `<tr><td>${rank}</td><td>${name}</td><td>${height}</td><td>${time}</td><td>${qualityScore}</td></tr>`;
                 } else {
-                    html += '<tr class="empty"><td>—</td><td></td><td></td><td></td></tr>';
+                    html += '<tr class="empty"><td>—</td><td></td><td></td><td></td><td></td></tr>';
                 }
             }
 
@@ -632,7 +644,7 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             } catch (_err) {
                 modeEl.textContent = 'Mode: --';
                 eventEl.textContent = 'Event: --';
-                rowsEl.innerHTML = '<tr><td colspan=\"4\" style=\"color:#9ab0d0\">Waiting for data…</td></tr>';
+                rowsEl.innerHTML = '<tr><td colspan=\"5\" style=\"color:#9ab0d0\">Waiting for data…</td></tr>';
                 statusEl.textContent = 'Waiting for data…';
             }
         }
@@ -718,6 +730,7 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
         rows.sort(
             key=lambda r: (
                 -int(r.get("final_height", 0)),
+                -int(r.get("quality_score", 0) or 0),
                 float(r.get("completion_time_s", 1e12)),
                 float(r.get("ended_at_unix", 0.0)),
             )
@@ -727,6 +740,10 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
         ranked = []
         for idx, row in enumerate(top, start=1):
             item = dict(row)
+            item["quality_score"] = int(item.get("quality_score", 0) or 0)
+            item["green_count"] = int(item.get("green_count", 0) or 0)
+            item["yellow_count"] = int(item.get("yellow_count", 0) or 0)
+            item["red_count"] = int(item.get("red_count", 0) or 0)
             item["rank"] = idx
             ranked.append(item)
 

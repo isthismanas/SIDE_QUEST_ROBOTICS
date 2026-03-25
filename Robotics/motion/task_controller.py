@@ -111,6 +111,10 @@ proposed_place_pose = None
 proposed_place_stack_level = None
 current_zone = "GREEN"
 current_zone_stack_level = None
+quality_score = 0
+green_count = 0
+yellow_count = 0
+red_count = 0
 green_place_streak = 0
 combo_active = False
 _unity_command_conn = None
@@ -615,6 +619,46 @@ def _log_inferred_block_state(event_name: str, **fields) -> None:
     write_jsonl_event("block_state", payload)
 
 
+def _quality_points_for_zone(zone: str) -> int:
+    normalized = str(zone).strip().upper()
+    if normalized == "GREEN":
+        return 3
+    if normalized == "YELLOW":
+        return 2
+    if normalized == "RED":
+        return 1
+    return 0
+
+
+def _reset_quality_tracking() -> None:
+    global quality_score, green_count, yellow_count, red_count
+    with _score_state_lock:
+        quality_score = 0
+        green_count = 0
+        yellow_count = 0
+        red_count = 0
+
+
+def _snapshot_quality_tracking() -> tuple[int, int, int, int]:
+    with _score_state_lock:
+        return int(quality_score), int(green_count), int(yellow_count), int(red_count)
+
+
+def _record_quality_placement(zone: str) -> int:
+    global quality_score, green_count, yellow_count, red_count
+    normalized = str(zone).strip().upper()
+    delta = _quality_points_for_zone(normalized)
+    with _score_state_lock:
+        if normalized == "GREEN":
+            green_count += 1
+        elif normalized == "YELLOW":
+            yellow_count += 1
+        elif normalized == "RED":
+            red_count += 1
+        quality_score += delta
+    return delta
+
+
 def _clear_score_commit_state(*, reset_committed: bool = True) -> None:
     global committed_stack_level, pending_commit_level, pending_commit_deadline, completion_finalize_pending, completion_end_mono
     with _score_state_lock:
@@ -671,11 +715,14 @@ def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
     if not finalize_complete:
         return False
 
-    lb.emit_run_summary(
+    run_quality_score, run_green_count, run_yellow_count, run_red_count = _snapshot_quality_tracking()
+
+    run_time_s = lb.emit_run_summary(
         "COMPLETE",
         run_start_time=run_start_time,
         participant_name=participant_name,
         current_stack_level=_resolve_official_score(effective_now),
+        quality_score=run_quality_score,
         end_time_mono=latched_end_mono,
     )
     if lb.finalize_run(
@@ -686,6 +733,10 @@ def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
         participant_name=participant_name,
         current_stack_level=_resolve_official_score(effective_now),
         run_start_time=run_start_time,
+        quality_score=run_quality_score,
+        green_count=run_green_count,
+        yellow_count=run_yellow_count,
+        red_count=run_red_count,
         already_finalized=run_finalized,
         end_time_mono=latched_end_mono,
     ):
@@ -694,6 +745,18 @@ def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
         last_finalized_mode = normalize_leaderboard_mode(lb_ctx.mode)
         last_finalized_session_id = session_id
         last_finalized_participant_name = participant_name
+
+    log_event(
+        "EVENT_RUN_SUMMARY",
+        participant=participant_name,
+        blocks_placed=_resolve_official_score(effective_now),
+        run_time_s=run_time_s,
+        quality_score=run_quality_score,
+        green_count=run_green_count,
+        yellow_count=run_yellow_count,
+        red_count=run_red_count,
+        source="COMPLETE",
+    )
 
     _send_line_to_unity(f"RUN_COMPLETE {current_stack_level}")
     time.sleep(5.0)
@@ -716,21 +779,25 @@ def _promote_pending_commit_if_ready(now_mono: float | None = None) -> bool:
     cfg.DRIFT_RUNTIME_PARTICIPANT = ""
     _last_ready_level_printed = None
     _clear_score_commit_state()
+    _reset_quality_tracking()
     _sync_json_log_context()
     return True
 
 
 def emit_run_summary(reason: str) -> float:
+    run_quality_score, _, _, _ = _snapshot_quality_tracking()
     return lb.emit_run_summary(
         reason,
         run_start_time=run_start_time,
         participant_name=participant_name,
         current_stack_level=_resolve_official_score(),
+        quality_score=run_quality_score,
     )
 
 
 def finalize_run(end_state: str) -> None:
     global run_finalized, last_finalized_run_id, last_finalized_mode, last_finalized_session_id, last_finalized_participant_name
+    run_quality_score, run_green_count, run_yellow_count, run_red_count = _snapshot_quality_tracking()
     if lb.finalize_run(
         end_state,
         ctx=lb_ctx,
@@ -739,6 +806,10 @@ def finalize_run(end_state: str) -> None:
         participant_name=participant_name,
         current_stack_level=_resolve_official_score(),
         run_start_time=run_start_time,
+        quality_score=run_quality_score,
+        green_count=run_green_count,
+        yellow_count=run_yellow_count,
+        red_count=run_red_count,
         already_finalized=run_finalized,
     ):
         run_finalized = True
@@ -770,12 +841,14 @@ def _handle_run_timeout() -> None:
     timeout_mono = time.monotonic()
     official_score = _resolve_official_score(timeout_mono)
     blocks_placed = official_score
+    run_quality_score, run_green_count, run_yellow_count, run_red_count = _snapshot_quality_tracking()
     
     run_time_s = lb.emit_run_summary(
         "TIMEOUT",
         run_start_time=run_start_time,
         participant_name=participant_name,
         current_stack_level=official_score,
+        quality_score=run_quality_score,
         end_time_mono=timeout_mono,
     )
     
@@ -787,6 +860,10 @@ def _handle_run_timeout() -> None:
         participant_name=participant_name,
         current_stack_level=official_score,
         run_start_time=run_start_time,
+        quality_score=run_quality_score,
+        green_count=run_green_count,
+        yellow_count=run_yellow_count,
+        red_count=run_red_count,
         already_finalized=run_finalized,
         end_time_mono=timeout_mono,
     ):
@@ -803,6 +880,10 @@ def _handle_run_timeout() -> None:
         participant=participant_name,
         blocks_placed=blocks_placed,
         run_time_s=run_time_s,
+        quality_score=run_quality_score,
+        green_count=run_green_count,
+        yellow_count=run_yellow_count,
+        red_count=run_red_count,
         source="TIMEOUT",
     )
     
@@ -861,6 +942,7 @@ def _handle_run_timeout() -> None:
     cfg.DRIFT_RUNTIME_PARTICIPANT = ""
     _last_ready_level_printed = None
     _clear_score_commit_state()
+    _reset_quality_tracking()
     _sync_json_log_context()
     if vr_connected:
         console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
@@ -1260,6 +1342,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         cfg.DRIFT_RUNTIME_PARTICIPANT = participant_name
         _last_ready_level_printed = None
         _clear_score_commit_state()
+        _reset_quality_tracking()
         _reset_drift_scale_for_run("NAME")
         vision_controller.reset_pick_tracking_memory()
         _write_vision_assist_state()
@@ -1348,11 +1431,13 @@ def handle_command(cmd_str: str, source: str) -> None:
         # Run summary before any state/session reset
         official_score = _resolve_official_score(tumble_received_mono)
         blocks_placed = official_score
+        run_quality_score, run_green_count, run_yellow_count, run_red_count = _snapshot_quality_tracking()
         run_time_s = lb.emit_run_summary(
             "TUMBLE",
             run_start_time=run_start_time,
             participant_name=participant_name,
             current_stack_level=official_score,
+            quality_score=run_quality_score,
             end_time_mono=tumble_received_mono,
         )
         if lb.finalize_run(
@@ -1363,6 +1448,10 @@ def handle_command(cmd_str: str, source: str) -> None:
             participant_name=participant_name,
             current_stack_level=official_score,
             run_start_time=run_start_time,
+            quality_score=run_quality_score,
+            green_count=run_green_count,
+            yellow_count=run_yellow_count,
+            red_count=run_red_count,
             already_finalized=run_finalized,
             end_time_mono=tumble_received_mono,
         ):
@@ -1378,6 +1467,10 @@ def handle_command(cmd_str: str, source: str) -> None:
             participant=participant_name,
             blocks_placed=blocks_placed,
             run_time_s=run_time_s,
+            quality_score=run_quality_score,
+            green_count=run_green_count,
+            yellow_count=run_yellow_count,
+            red_count=run_red_count,
             source=source,
         )
 
@@ -1425,6 +1518,7 @@ def handle_command(cmd_str: str, source: str) -> None:
         cfg.DRIFT_RUNTIME_PARTICIPANT = ""
         _last_ready_level_printed = None
         _clear_score_commit_state()
+        _reset_quality_tracking()
         _sync_json_log_context()
         if vr_connected:
             console_emit("Waiting for participant name...", tag="PROMPT", level="INFO", module="CONTROL", allow_in_quiet=True)
@@ -1700,6 +1794,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                 run_id = uuid4().hex
                 run_finalized = False
                 _clear_score_commit_state()
+                _reset_quality_tracking()
                 green_place_streak = 0
                 if combo_active:
                     send_boost_end()
@@ -2176,6 +2271,8 @@ def handle_command(cmd_str: str, source: str) -> None:
 
                 handles.combo_active = combo_active
                 actions.complete_place_neutral_exit(handles, current_stack_level, target_id=placed_target_id)
+                placement_quality_delta = _record_quality_placement(zone_at_commit)
+                run_quality_score, run_green_count, run_yellow_count, run_red_count = _snapshot_quality_tracking()
 
                 if current_zone_stack_level == current_stack_level and current_zone == "RED":
                     cfg.DRIFT_SCALE = min(3.0, float(cfg.DRIFT_SCALE) + float(cfg.DRIFT_RISK_INCREMENT))
@@ -2190,6 +2287,11 @@ def handle_command(cmd_str: str, source: str) -> None:
                     stack_level=int(current_stack_level),
                     tower_target_id=cfg.build_target_id_for_level(current_stack_level),
                     zone_at_commit=zone_at_commit,
+                    quality_points_awarded=int(placement_quality_delta),
+                    quality_score_after=int(run_quality_score),
+                    green_count=int(run_green_count),
+                    yellow_count=int(run_yellow_count),
+                    red_count=int(run_red_count),
                     source="deterministic_place",
                     place_pose=final_place_pose,
                     retract_hover_pose=(
@@ -2279,8 +2381,20 @@ def handle_command(cmd_str: str, source: str) -> None:
                     if completion_finalize_pending:
                         info(module, "[STACK] COMPLETE awaiting pending score commit window.")
                         return
-                    emit_run_summary("COMPLETE")
+                    run_time_s = emit_run_summary("COMPLETE")
                     finalize_run("COMPLETE")
+                    run_quality_score, run_green_count, run_yellow_count, run_red_count = _snapshot_quality_tracking()
+                    log_event(
+                        "EVENT_RUN_SUMMARY",
+                        participant=participant_name,
+                        blocks_placed=current_stack_level,
+                        run_time_s=run_time_s,
+                        quality_score=run_quality_score,
+                        green_count=run_green_count,
+                        yellow_count=run_yellow_count,
+                        red_count=run_red_count,
+                        source="COMPLETE",
+                    )
                     _send_line_to_unity(f"RUN_COMPLETE {current_stack_level}")
                     time.sleep(5.0)
                     console_emit("[STACK] COMPLETE summary emitted (post-wait)", tag="SUMMARY", level="INFO", module=module, allow_in_quiet=True)
@@ -2302,6 +2416,7 @@ def handle_command(cmd_str: str, source: str) -> None:
                     cfg.DRIFT_RUNTIME_PARTICIPANT = ""
                     _last_ready_level_printed = None
                     _clear_score_commit_state()
+                    _reset_quality_tracking()
                     _sync_json_log_context()
                     return
 
@@ -2863,19 +2978,19 @@ def _start_worker_thread(name: str, target, args=(), daemon: bool = False) -> No
 
 
 # --- 5. START SYSTEM ---
-_start_worker_thread("command-server", command_server)
-_start_worker_thread("admin-server", admin_server)
-_start_worker_thread("leaderboard-http", lb.leaderboard_http_server, args=(lb_ctx, STOP_EVENT, LEADERBOARD_PORT))
-if CAMERA_STREAM_RUNTIME_ENABLED and (dai is not None) and (camera_streamer is not None):
-    _start_worker_thread("camera-inspector", camera_server_wrapper, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
-    time.sleep(10)
-    _start_worker_thread("camera-site-manager", camera_server_wrapper, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
-if _is_official_mode():
-    console_emit("Start Unity and press Play...", tag="UNITY", level="INFO", module="CONTROL", allow_in_quiet=True)
-_start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)
-
-info("CONTROL", "TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
 try:
+    _start_worker_thread("command-server", command_server)
+    _start_worker_thread("admin-server", admin_server)
+    _start_worker_thread("leaderboard-http", lb.leaderboard_http_server, args=(lb_ctx, STOP_EVENT, LEADERBOARD_PORT))
+    if CAMERA_STREAM_RUNTIME_ENABLED and (dai is not None) and (camera_streamer is not None):
+        _start_worker_thread("camera-inspector", camera_server_wrapper, args=(MXID_INSPECTOR, UNITY_PORT_INSPECTOR, "INSPECTOR"))
+        time.sleep(10)
+        _start_worker_thread("camera-site-manager", camera_server_wrapper, args=(MXID_MANAGER, UNITY_PORT_MANAGER, "SITE_MANAGER"))
+    if _is_official_mode():
+        console_emit("Start Unity and press Play...", tag="UNITY", level="INFO", module="CONTROL", allow_in_quiet=True)
+    _start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)
+
+    info("CONTROL", "TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
     while True:
         _promote_pending_commit_if_ready()
         
