@@ -28,7 +28,7 @@ RUN_MODE = "DEBUG"
 # ----------------------------
 COMM_MODE = "voice"               # "default" for Unity Buttons, "voice" for Standalone Microphone
 VOICE_CONFIDENCE_THRESHOLD = 0.20 # Require 65% match from Whisper (fallback to Facilitator otherwise)
-VOICE_NUDGE_MM = 10.0             # Step size for voice directional nudges
+VOICE_NUDGE_MM = 1.0             # Step size for voice directional nudges
 LOG_LEVEL = "INFO"
 LOG_MODULES = {
     "DOBOT": "WARN",
