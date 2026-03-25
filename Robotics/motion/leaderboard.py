@@ -423,8 +423,8 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             width: 100%;
             padding: 0 0 14px 0;
             display: grid;
-            grid-template-rows: auto auto auto auto;
-            gap: 4px;
+            grid-template-rows: auto auto;
+            gap: 0;
         }
         .logo-band {
             width: 100vw;
@@ -448,10 +448,32 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             max-width: 26%;
             object-fit: contain;
         }
+        .content-grid {
+            width: min(1500px, 100%);
+            margin: 0 auto;
+            padding: 12px 20px 0 20px;
+            display: grid;
+            grid-template-columns: 0.8fr 1.2fr;
+            gap: 180px;
+            align-items: start;
+        }
+        .guide-column {
+            width: 100%;
+        }
+        .guide-image {
+            display: block;
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            border-radius: 12px;
+        }
+        .leaderboard-column {
+            min-width: 0;
+        }
         h1 {
             margin: 6px 0 2px 0;
             letter-spacing: 1px;
-            font-size: clamp(48px, 6.5vw, 96px);
+            font-size: clamp(32px, 4vw, 64px);
             text-transform: uppercase;
             text-align: center;
             white-space: nowrap;
@@ -532,6 +554,16 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
             text-align: center;
             font-weight: 600;
         }
+        @media (max-width: 1200px) {
+            .content-grid {
+                grid-template-columns: 1fr;
+                gap: 18px;
+            }
+            .guide-column {
+                max-width: 600px;
+                justify-self: center;
+            }
+        }
     </style>
 </head>
 <body>
@@ -545,28 +577,35 @@ class _LeaderboardHandler(BaseHTTPRequestHandler):
                 <img src=\"/assets/logo5.png\" alt=\"Side Quest Logo 5\" class=\"logo\">
             </div>
         </div>
-        <h1>SIDE QUEST LEADERBOARD</h1>
-        <div class=\"subhead\">HIGH SCORE</div>
-        <div class="countdown" id="countdown">Challenge finishes in: --</div>
-        <div class=\"panel\">
-            <table>
-                <thead>
-                    <tr>
-                        <th style=\"width: 12%\">Rank</th>
-                        <th style=\"width: 38%\">Pilot Name</th>
-                        <th style=\"width: 16%\">Height</th>
-                        <th style=\"width: 16%\">Time</th>
-                        <th style=\"width: 18%\">Quality Score</th>
-                    </tr>
-                </thead>
-                <tbody id=\"rows\"></tbody>
-            </table>
+        <div class=\"content-grid\">
+            <div class=\"guide-column\">
+                <img src=\"/assets/guide.png\" alt=\"Participant Guide\" class=\"guide-image\">
+            </div>
+            <div class=\"leaderboard-column\">
+                <h1>SIDE QUEST LEADERBOARD</h1>
+                <div class=\"subhead\">HIGH SCORE</div>
+                <div class="countdown" id="countdown">Challenge finishes in: --</div>
+                <div class=\"panel\">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style=\"width: 12%\">Rank</th>
+                                <th style=\"width: 38%\">Pilot Name</th>
+                                <th style=\"width: 16%\">Height</th>
+                                <th style=\"width: 16%\">Time</th>
+                                <th style=\"width: 18%\">Quality Score</th>
+                            </tr>
+                        </thead>
+                        <tbody id=\"rows\"></tbody>
+                    </table>
+                </div>
+                <div class=\"meta\">
+                    <div id=\"mode\">Mode: --</div>
+                    <div id=\"event\">Event: --</div>
+                </div>
+                <div class=\"status\" id=\"status\">Waiting for data…</div>
+            </div>
         </div>
-        <div class=\"meta\">
-            <div id=\"mode\">Mode: --</div>
-            <div id=\"event\">Event: --</div>
-        </div>
-        <div class=\"status\" id=\"status\">Waiting for data…</div>
     </div>
 
     <script>
