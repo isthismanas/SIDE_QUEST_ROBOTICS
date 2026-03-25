@@ -103,7 +103,7 @@ NUDGE_MAX_OFFSET_MM = 10  # max allowed XY offset from nominal placement center
 # ----------------------------
 # Stacking (Deterministic Pick & Place)
 # ----------------------------
-PICK_POSE_MODE = "deterministic"  # "deterministic" | "vision" | "vision-autonomous" | "experimental"
+PICK_POSE_MODE = "vision"  # "deterministic" | "vision" | "vision-autonomous" | "experimental"
 CAMERA_STREAM_ENABLED = True       # enables OAK camera streaming independent of pick mode
 VISION_ASSIST_ENABLED = True       # calibrated perception in shadow mode; does not control pick motion
 VISION_REFERENCE_MARKER_ID = 0     # marker used for camera-to-robot reference tracking
@@ -125,7 +125,7 @@ VISION_PICK_WORKSPACE_Y_MM = (-80.0, 60.0)
 # - affects pickup estimation only
 # - does not change deterministic controller motion
 # - falls back to the base calibrated affine map when unavailable
-VISION_PICK_ML_ENABLED = True
+VISION_PICK_ML_ENABLED = False
 VISION_PICK_ML_DISABLED_TARGET_IDS = ("P7",)
 VISION_PICK_ML_MODEL_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
