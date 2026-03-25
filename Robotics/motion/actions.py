@@ -464,7 +464,7 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
     Deterministic tumble flow.
     Returns detected holding state before executing motions.
 
-    A) Holding -> SAFE_DUMP_POSE -> open -> NEUTRAL_3
+    A) Holding -> NEUTRAL_3 -> SAFE_DUMP_POSE -> open -> NEUTRAL_3
     B) Not holding -> NEUTRAL_3
     """
 def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[bool] = None, run_terminating: bool = False) -> bool:
@@ -472,7 +472,7 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
     Deterministic tumble flow.
     Returns detected holding state before executing motions.
 
-    A) Holding -> SAFE_DUMP_POSE -> open -> NEUTRAL_3
+    A) Holding -> NEUTRAL_3 -> SAFE_DUMP_POSE -> open -> NEUTRAL_3
     B) Not holding -> NEUTRAL_3
     """
     info("STACK", f"[TUMBLE] >>> ENTER fallback_holding={fallback_holding} run_terminating={run_terminating}")
@@ -489,6 +489,12 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
             dump_pose[4],
             dump_pose[5],
         )
+
+        neutral3 = cfg.neutral_pose_for_slot(3)
+        info("STACK", f"[TUMBLE] branch=A step=move_neutral3_pre_dump pose={neutral3}")
+        handles.robot.movj_pose(neutral3)
+        handles.robot.wait_until_idle()
+        info("STACK", "[TUMBLE] branch=A wait_until_idle=done after move_neutral3_pre_dump")
 
         info("STACK", f"[TUMBLE] branch=A step=move_dump_hover pose={dump_hover_pose}")
         handles.robot.movj_pose(dump_hover_pose)
@@ -515,7 +521,6 @@ def execute_tumble_sequence(handles: SystemHandles, fallback_holding: Optional[b
         handles.robot.wait_until_idle()
         info("STACK", "[TUMBLE] branch=A wait_until_idle=done after movl_up_hover")
 
-        neutral3 = cfg.neutral_pose_for_slot(3)
         info("STACK", f"[TUMBLE] branch=A step=move_neutral3 pose={neutral3}")
         handles.robot.movj_pose(neutral3)
         info("STACK", "[TUMBLE] branch=A movj for neutral3 issued (no wait)")

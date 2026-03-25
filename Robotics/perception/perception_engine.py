@@ -239,7 +239,8 @@ class PerceptionEngine:
         self.running = True
         self.worker_thread = threading.Thread(target=self._worker_loop, args=(queueL, queueR), daemon=True)
         self.worker_thread.start()
-        info("PERCEPTION", "Started perception worker thread.")
+        if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+            info("PERCEPTION", "Started perception worker thread.")
 
     def _worker_loop(self, queueL, queueR):
         while self.running:
@@ -265,14 +266,17 @@ class PerceptionEngine:
                 else:
                     time.sleep(0.01) # Avoid busy waiting
             except Exception as e:
-                warn("PERCEPTION", f"Exception in worker loop: {e}")
+                # Suppress exceptions during shutdown (self.running is False)
+                if self.running:
+                    warn("PERCEPTION", f"Exception in worker loop: {e}")
                 time.sleep(0.5)
 
     def stop_worker(self):
         self.running = False
         if self.worker_thread:
             self.worker_thread.join(timeout=1.0)
-            info("PERCEPTION", "Stopped perception worker thread.")
+            if bool(getattr(cfg, "DEBUG_ENABLED", False)):
+                info("PERCEPTION", "Stopped perception worker thread.")
 
 # Singleton instance
 engine = PerceptionEngine()
