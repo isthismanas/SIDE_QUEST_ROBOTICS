@@ -1213,6 +1213,16 @@ def handle_command(cmd_str: str, source: str) -> None:
 
     _promote_pending_commit_if_ready()
 
+    # ====================================================
+    # ADDED: ALBERT'S VOICE / FACILITATOR / ADMIN BYPASS
+    if source in ("ADMIN", "VOICE", "FACILITATOR"):
+        upper_cmd = cmd_str.strip().upper()
+        if upper_cmd == "DROP":
+            cmd_str = f"DROP {decision_seq}"
+        elif upper_cmd == "FIX":
+            cmd_str = f"FIX {decision_seq}"
+    # ====================================================
+
     # Normalize command
     if cmd_str == "COMMIT":
         cmd_str = "DROP"
@@ -2869,6 +2879,45 @@ if CAMERA_STREAM_RUNTIME_ENABLED and (dai is not None) and (camera_streamer is n
 if _is_official_mode():
     console_emit("Start Unity and press Play...", tag="UNITY", level="INFO", module="CONTROL", allow_in_quiet=True)
 _start_worker_thread("facilitator-hotkey", facilitator_hotkey_loop, daemon=True)
+
+# =========================================================
+# THE NEW PHASE 2 VOICE BOOTSTRAPPER 
+# =========================================================
+if getattr(cfg, "COMM_MODE", "default").strip().lower() == "voice":
+    import voice_module
+    
+    def on_voice_command(cmd):
+        if cmd == "LOW_CONFIDENCE":
+            # Handover to manual console per design constraints
+            console_emit(
+                "⚠️ VOICE OVERRIDE: Bad read (< 65% conf). Facilitator input required!",
+                tag="VOICE", level="WARN", allow_in_quiet=True
+            )
+            return
+
+        n_dist = getattr(cfg, "VOICE_NUDGE_MM", 10.0)
+        action_cmd = cmd
+        if cmd == "NUDGE_RIGHT":   action_cmd = f"NUDGE {n_dist} 0"
+        elif cmd == "NUDGE_LEFT":  action_cmd = f"NUDGE {-n_dist} 0"
+        elif cmd == "NUDGE_FORWARD": action_cmd = f"NUDGE 0 {n_dist}"
+        elif cmd == "NUDGE_BACK":  action_cmd = f"NUDGE 0 {-n_dist}"
+        
+        # Injects the voice command directly into the task_controller function
+        handle_command(action_cmd, "VOICE")
+        
+    def get_system_state():
+        return STATE.name
+
+    threshold = getattr(cfg, "VOICE_CONFIDENCE_THRESHOLD", 0.65)
+    
+    # Spawn the background worker!
+    _start_worker_thread(
+        "voice-brain", 
+        target=voice_module.start_voice_assistant, 
+        args=(on_voice_command, get_system_state, threshold), 
+        daemon=True
+    )
+# =========================================================
 
 info("CONTROL", "TASK CONTROLLER ACTIVE. Press Ctrl+C to stop.")
 try:
