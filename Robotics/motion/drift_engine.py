@@ -46,6 +46,10 @@ def compute_drift(
     if not cfg.DRIFT_ENABLED:
         return 0.0, 0.0
 
+    # Keep the first base block centered; drift starts from level 1.
+    if int(stack_level) == 0:
+        return 0.0, 0.0
+
     effective_max = cfg.DRIFT_MAX_XY_MM * cfg.DRIFT_SCALE
 
     if effective_max <= 0:
