@@ -16,10 +16,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
+
+MOTION_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "motion"))
+if MOTION_DIR not in sys.path:
+    sys.path.append(MOTION_DIR)
+
+from data_lineage import current_data_lineage_tag, tagged_path
 
 
 def _load_records(path: str) -> list[dict[str, Any]]:
@@ -155,7 +162,7 @@ def _default_output_path(input_path: str) -> str:
     directory = os.path.dirname(input_path) or "."
     stem = os.path.splitext(os.path.basename(input_path))[0]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return os.path.join(directory, f"{stem}_phase3_solution_{timestamp}.json")
+    return tagged_path(os.path.join(directory, f"{stem}_phase3_solution_{timestamp}.json"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -209,6 +216,7 @@ def main() -> int:
     output_path = args.output or _default_output_path(args.input_jsonl)
     payload = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "data_lineage_tag": current_data_lineage_tag() or None,
         "input_jsonl": os.path.abspath(args.input_jsonl),
         "sample_count": len(records),
         "sample_labels": labels,

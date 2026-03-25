@@ -34,6 +34,7 @@ if MOTION_DIR not in sys.path:
 from dobot_driver import DobotDriver
 import robot_config as cfg
 import vision_bridge
+from data_lineage import current_data_lineage_tag, tagged_path
 from phase2_calibration_capture import (
     DEFAULT_TOPDOWN_DEVICE_ID,
     DEFAULT_TOPDOWN_LABEL,
@@ -54,7 +55,7 @@ def _default_output_path(explicit_path: Optional[str]) -> str:
     else:
         out_dir = os.path.join(THIS_DIR, "calibration_data")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        output_path = os.path.join(out_dir, f"pick_plane_capture_{timestamp}.jsonl")
+        output_path = tagged_path(os.path.join(out_dir, f"pick_plane_capture_{timestamp}.jsonl"))
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     return output_path
 
@@ -455,6 +456,7 @@ def _interactive_loop(
                     "sample_index": sample_index,
                     "sample_label": sample_label,
                     "timestamp_utc": _timestamp_utc(),
+                    "data_lineage_tag": current_data_lineage_tag() or None,
                     "device_id": device_id,
                     "device_label": device_label,
                     "marker_id": int(marker_id),

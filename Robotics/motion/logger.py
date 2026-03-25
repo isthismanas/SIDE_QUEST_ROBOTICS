@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
 
+from data_lineage import current_data_lineage_tag, tagged_log_stream_path
 from robot_config import LOG_LEVEL, LOG_MODULES, RUN_MODE
 
 
@@ -100,9 +101,12 @@ def clear_jsonl_context(*keys: str) -> None:
 
 def write_jsonl_event(stream_name: str, event: dict[str, Any]) -> str:
 	os.makedirs(_PERCEPTION_LOG_DIR, exist_ok=True)
-	file_path = os.path.join(_PERCEPTION_LOG_DIR, f"{stream_name}.jsonl")
+	file_path = tagged_log_stream_path(_PERCEPTION_LOG_DIR, stream_name)
+	lineage_tag = current_data_lineage_tag()
 	with _JSON_LOG_LOCK:
 		record = {"ts_utc": _timestamp_utc(), **_JSON_LOG_CONTEXT, **event}
+		if lineage_tag and "data_lineage_tag" not in record:
+			record["data_lineage_tag"] = lineage_tag
 		line = json.dumps(record, separators=(",", ":"), sort_keys=True)
 		with open(file_path, "a", encoding="utf-8") as handle:
 			handle.write(line)

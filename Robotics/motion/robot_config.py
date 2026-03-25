@@ -16,6 +16,11 @@ import os
 # Runtime debug verbosity switch (terminal diagnostics only)
 DEBUG_ENABLED = False
 
+# Showcase / session data-lineage tag.
+# This is used to segregate runtime JSONL streams and default generated
+# calibration/model artifact names from older datasets.
+DATA_LINEAGE_TAG = os.environ.get("SIDE_QUEST_DATA_TAG", "eventday1").strip()
+
 # Run mode
 # Allowed: "COMP", "DEBUG"
 RUN_MODE = "DEBUG"

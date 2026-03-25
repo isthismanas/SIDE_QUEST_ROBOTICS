@@ -23,6 +23,7 @@ if MOTION_DIR not in sys.path:
 import robot_config as cfg
 import vision_bridge
 import vision_pick_ml
+from data_lineage import current_data_lineage_tag, tagged_log_stream_path, tagged_path
 
 
 def _load_jsonl(path: str) -> list[dict[str, Any]]:
@@ -51,15 +52,15 @@ def _default_input_jsonl() -> str:
 
 
 def _default_output_json() -> str:
-    return os.path.join(THIS_DIR, "calibration_data", "pick_plane_marker13_20260318_ml_residual.json")
+    return tagged_path(os.path.join(THIS_DIR, "calibration_data", "pick_plane_marker13_20260318_ml_residual.json"))
 
 
 def _default_grab_pick_log_jsonl() -> str:
-    return os.path.join(THIS_DIR, "logs", "grab_pick.jsonl")
+    return tagged_log_stream_path(os.path.join(THIS_DIR, "logs"), "grab_pick")
 
 
 def _default_pickup_runtime_residual_jsonl() -> str:
-    return os.path.join(THIS_DIR, "logs", "pickup_runtime_residual.jsonl")
+    return tagged_log_stream_path(os.path.join(THIS_DIR, "logs"), "pickup_runtime_residual")
 
 
 def _canonical_lineage_path(path: str | None) -> str:
@@ -187,6 +188,20 @@ def _pick_target_xy_mm(target_id: str) -> tuple[float, float]:
     return float(pose[0]), float(pose[1])
 
 
+def _ml_disabled_target_ids() -> set[str]:
+    return {
+        str(value).strip().upper()
+        for value in getattr(cfg, "VISION_PICK_ML_DISABLED_TARGET_IDS", ())
+        if str(value).strip()
+    }
+
+
+def _is_ml_disabled_target(target_id: str | None) -> bool:
+    if not isinstance(target_id, str):
+        return False
+    return str(target_id).strip().upper() in _ml_disabled_target_ids()
+
+
 def _feature_vector_from_camera_summary(summary: dict[str, Any], feature_names: tuple[str, ...]) -> tuple[float, ...]:
     median_pose = dict(summary["median_pose"])
     feature_map, reason = vision_pick_ml.feature_map_from_camera_pose(median_pose)
@@ -257,6 +272,7 @@ def _load_log_confirmation_samples(
     samples: list[dict[str, Any]] = []
     considered_plan_rows = 0
     skipped_lineage_rows = 0
+    skipped_disabled_target_rows = 0
     for row in rows:
         event_name = str(row.get("event", "")).strip()
         if event_name not in {"vision_pick_place_plan", "grab_pick_plan"}:
@@ -281,6 +297,9 @@ def _load_log_confirmation_samples(
 
         actual_target_id, target_reason = _infer_actual_target_from_plan(row, max_target_distance_mm)
         if actual_target_id is None:
+            continue
+        if _is_ml_disabled_target(actual_target_id):
+            skipped_disabled_target_rows += 1
             continue
 
         feature_vector = _feature_vector_from_camera_summary(camera_summary, feature_names)
@@ -309,6 +328,7 @@ def _load_log_confirmation_samples(
     return samples, {
         "considered_plan_rows": considered_plan_rows,
         "skipped_lineage_rows": skipped_lineage_rows,
+        "skipped_disabled_target_rows": skipped_disabled_target_rows,
     }
 
 
@@ -370,6 +390,7 @@ def _load_runtime_residual_samples(
     samples: list[dict[str, Any]] = []
     considered_runtime_rows = 0
     joined_runtime_rows = 0
+    skipped_disabled_target_rows = 0
     for row in runtime_rows:
         event_name = str(row.get("event", "")).strip()
         if event_name != "pickup_runtime_residual":
@@ -381,6 +402,9 @@ def _load_runtime_residual_samples(
             continue
         target_id = _runtime_target_id(row)
         if target_id is None:
+            continue
+        if _is_ml_disabled_target(target_id):
+            skipped_disabled_target_rows += 1
             continue
         residual_to_expected = row.get("residual_to_expected_mm")
         if not isinstance(residual_to_expected, dict):
@@ -434,6 +458,7 @@ def _load_runtime_residual_samples(
     return samples, {
         "considered_runtime_rows": considered_runtime_rows,
         "joined_runtime_rows": joined_runtime_rows,
+        "skipped_disabled_target_rows": skipped_disabled_target_rows,
     }
 
 
@@ -583,7 +608,11 @@ def main() -> int:
         )
 
     log_sample_count = 0
-    log_lineage_stats = {"considered_plan_rows": 0, "skipped_lineage_rows": 0}
+    log_lineage_stats = {
+        "considered_plan_rows": 0,
+        "skipped_lineage_rows": 0,
+        "skipped_disabled_target_rows": 0,
+    }
     if bool(args.use_log_confirmation_samples):
         if not os.path.exists(args.grab_pick_log_jsonl):
             raise ValueError(f"Log confirmation dataset not found: {args.grab_pick_log_jsonl}")
@@ -597,7 +626,11 @@ def main() -> int:
         log_sample_count = len(log_samples)
 
     runtime_sample_count = 0
-    runtime_lineage_stats = {"considered_runtime_rows": 0, "joined_runtime_rows": 0}
+    runtime_lineage_stats = {
+        "considered_runtime_rows": 0,
+        "joined_runtime_rows": 0,
+        "skipped_disabled_target_rows": 0,
+    }
     if bool(args.use_runtime_residual_samples):
         if not os.path.exists(args.grab_pick_log_jsonl):
             raise ValueError(f"Plan log dataset not found for runtime joins: {args.grab_pick_log_jsonl}")
@@ -671,6 +704,7 @@ def main() -> int:
     payload = {
         "model_type": "pick_residual_knn_v1",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "data_lineage_tag": current_data_lineage_tag() or None,
         "source_calibration_jsonl": os.path.abspath(args.input_jsonl),
         "source_log_confirmation_jsonl": os.path.abspath(args.grab_pick_log_jsonl) if bool(args.use_log_confirmation_samples) else None,
         "source_runtime_residual_jsonl": os.path.abspath(args.pickup_runtime_residual_jsonl) if bool(args.use_runtime_residual_samples) else None,
@@ -752,13 +786,15 @@ def main() -> int:
         print(
             "[PICK_ML] "
             f"log_plan_rows_considered={log_lineage_stats['considered_plan_rows']} "
-            f"log_plan_rows_skipped_lineage={log_lineage_stats['skipped_lineage_rows']}"
+            f"log_plan_rows_skipped_lineage={log_lineage_stats['skipped_lineage_rows']} "
+            f"log_plan_rows_skipped_disabled_target={log_lineage_stats['skipped_disabled_target_rows']}"
         )
     if bool(args.use_runtime_residual_samples):
         print(
             "[PICK_ML] "
             f"runtime_rows_considered={runtime_lineage_stats['considered_runtime_rows']} "
-            f"runtime_rows_joined={runtime_lineage_stats['joined_runtime_rows']}"
+            f"runtime_rows_joined={runtime_lineage_stats['joined_runtime_rows']} "
+            f"runtime_rows_skipped_disabled_target={runtime_lineage_stats['skipped_disabled_target_rows']}"
         )
     print(f"[PICK_ML] base_rmse_total_mm={payload['metrics']['base_rmse_total_mm']:.3f}")
     print(f"[PICK_ML] train_rmse_total_mm={payload['metrics']['train_rmse_total_mm']:.3f}")

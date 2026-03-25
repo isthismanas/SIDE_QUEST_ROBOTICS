@@ -16,8 +16,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any
+
+MOTION_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "motion"))
+if MOTION_DIR not in sys.path:
+    sys.path.append(MOTION_DIR)
+
+from data_lineage import current_data_lineage_tag, tagged_log_stream_path, tagged_path
 
 
 def _load_jsonl(path: str) -> list[dict[str, Any]]:
@@ -197,6 +204,7 @@ def _solve_capture(input_jsonl: str, output_json: str) -> dict[str, Any]:
     xy_fit = solver_api["fit_affine"](inputs=camera_xyz_mm[:, :2], outputs=robot_xyz_mm[:, :2])
     payload = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "data_lineage_tag": current_data_lineage_tag() or None,
         "input_jsonl": os.path.abspath(input_jsonl),
         "sample_count": len(records),
         "sample_labels": labels,
@@ -228,24 +236,24 @@ def _solve_capture(input_jsonl: str, output_json: str) -> dict[str, Any]:
 def _default_capture_path(participant_name: str | None) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     label = participant_name or "runtime"
-    return os.path.join(
+    return tagged_path(os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "calibration_data",
         f"{label}_runtime_pick_pairs_{stamp}.jsonl",
-    )
+    ))
 
 
 def _default_solution_path(input_jsonl: str) -> str:
     directory = os.path.dirname(input_jsonl) or "."
     stem = os.path.splitext(os.path.basename(input_jsonl))[0]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return os.path.join(directory, f"{stem}_phase3_solution_{timestamp}.json")
+    return tagged_path(os.path.join(directory, f"{stem}_phase3_solution_{timestamp}.json"))
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fit pickup-plane calibration from runtime logs.")
-    parser.add_argument("--marker-log", default=os.path.join("Robotics", "perception", "logs", "marker_positions.jsonl"))
-    parser.add_argument("--block-log", default=os.path.join("Robotics", "perception", "logs", "block_state.jsonl"))
+    parser.add_argument("--marker-log", default=tagged_log_stream_path(os.path.join("Robotics", "perception", "logs"), "marker_positions"))
+    parser.add_argument("--block-log", default=tagged_log_stream_path(os.path.join("Robotics", "perception", "logs"), "block_state"))
     parser.add_argument("--participant-name", default=None, help="Optional participant label. Defaults to latest available run.")
     parser.add_argument("--run-id", default=None, help="Optional run id filter.")
     parser.add_argument("--session-id", default=None, help="Optional session id filter.")
